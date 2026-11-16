@@ -9,7 +9,15 @@ from collections.abc import Iterator
 from itertools import pairwise
 
 from endurance_planner.load import intensity_split, run_impact_multiplier, week_weighted_load
-from endurance_planner.models.enums import Phase, Severity, Slot, Sport, TargetKind, Weekday
+from endurance_planner.models.enums import (
+    GoalType,
+    Phase,
+    Severity,
+    Slot,
+    Sport,
+    TargetKind,
+    Weekday,
+)
 from endurance_planner.models.issues import Issue
 from endurance_planner.models.plan import Plan, Session, Week
 from endurance_planner.models.profile import Profile
@@ -255,6 +263,8 @@ def _check_hard_sessions(plan: Plan, profile: Profile) -> Iterator[Issue]:
 
 def _check_intensity(plan: Plan, profile: Profile, zones: ZoneSet) -> Iterator[Issue]:
     target = profile.preferences.intensity_ratio.high
+    # Ultra plans are low-intensity by design: no "too little intensity" warning for them.
+    ultra_goals = {goal.name for goal in plan.goals if goal.type is GoalType.ULTRA_ENDURANCE}
     block_low = block_high = 0
     block: list[Week] = []
     for week in plan.weeks:
@@ -274,6 +284,7 @@ def _check_intensity(plan: Plan, profile: Profile, zones: ZoneSet) -> Iterator[I
                 week.phase in (Phase.BUILD, Phase.PEAK)
                 and not week.recovery
                 and share < MIN_HIGH_SHARE
+                and week.goal not in ultra_goals
             ):
                 yield _warning(
                     "low_intensity_share",

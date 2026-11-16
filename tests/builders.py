@@ -121,3 +121,27 @@ def mtb_marathon_profile() -> Profile:
         ],
         edits={"current_fitness.weekly_hours": {"bike": 7, "run": 0.75}},
     )
+
+
+def ultra_profile(sport: str = "bike") -> Profile:
+    """Scenario: ultra-endurance event in 20 weeks."""
+    return make_profile(
+        goals=[
+            goal(
+                "Ultra",
+                dt.date(2027, 4, 3),
+                "ultra_endurance",
+                sport=sport,
+                target={"duration_h": 12},
+            )
+        ],
+        edits={
+            "preferences.primary_sport": sport,
+            "availability.weekly_hours_budget": 12,
+            "availability.weekdays.sat": {"bike": 420, "run": 240},
+            "availability.weekdays.sun": {"bike": 300, "run": 150},
+            "availability.swap_rules.max_runs_per_week": 4,
+            "current_fitness.weekly_hours": {"bike": 7, "run": 3},
+            "current_fitness.longest_recent_session_min": {"bike": 210, "run": 100},
+        },
+    )

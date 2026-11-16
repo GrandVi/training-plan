@@ -40,6 +40,12 @@ FUELING_NOTE = (
     "use the food and bottles planned for race day."
 )
 
+ULTRA_NOTE = (
+    "Time in the saddle / on feet matters more than speed: keep it easy. "
+    + FUELING_NOTE
+    + " Test your kit, lights and pacing plan."
+)
+
 GOAL_DISTANCE_KM = {
     GoalType.RUN_5K: 5.0,
     GoalType.RUN_10K: 10.0,
@@ -125,5 +131,28 @@ GOAL_SPECS: dict[GoalType, GoalSpec] = {
         quality_long=frozenset({BUILD, PEAK}),
         technical=True,
         long_notes=FUELING_NOTE,
+    ),
+    # Ultra: durability first. One key session a week (tempo / sweet spot, no VO2max block),
+    # back-to-back long days in build and peak, fueling practice on every long session.
+    GoalType.ULTRA_ENDURANCE: GoalSpec(
+        min_weeks=12,
+        taper_factors=(0.75, 0.55),
+        keys={
+            Sport.BIKE: {
+                BASE: (("bike_tempo", "bike_low_cadence"),),
+                BUILD: (("bike_sweet_spot", "bike_tempo"),),
+                PEAK: (("bike_sweet_spot", "bike_threshold"),),
+            },
+            Sport.RUN: {
+                BASE: (("run_hills", "run_tempo"),),
+                BUILD: (("run_tempo", "run_hills"),),
+                PEAK: (("run_tempo",),),
+            },
+        },
+        long_max_min={Sport.BIKE: 360, Sport.RUN: 180},
+        recommended_hours=10,
+        phase_split=(0.50, 0.35, 0.15),
+        back_to_back=True,
+        long_notes=ULTRA_NOTE,
     ),
 }
