@@ -95,3 +95,12 @@ def test_fitness_csv(plan: Plan) -> None:
     assert sum(float(row["tss"]) for row in rows) == pytest.approx(sum(w.tss for w in plan.weeks))
     # Form rises through the taper.
     assert float(rows[-1]["tsb"]) > float(rows[-10]["tsb"])
+
+
+def test_example_plan_markdown_is_up_to_date() -> None:
+    """examples/plan.example.md is the golden file of the full pipeline on the example profile."""
+    from builders import EXAMPLE, make_profile
+
+    profile = make_profile()
+    text = render_markdown(generate_plan(profile, TODAY), profile, weeks=[1, 9, 26])
+    assert text == (EXAMPLE.parent / "plan.example.md").read_text(encoding="utf-8")
