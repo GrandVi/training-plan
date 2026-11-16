@@ -35,6 +35,11 @@ class GoalSpec:
         return pace - 0.05, pace + 0.05
 
 
+FUELING_NOTE = (
+    "Practice race fueling: 60-90 g of carbohydrate per hour, drink regularly, "
+    "use the food and bottles planned for race day."
+)
+
 GOAL_DISTANCE_KM = {
     GoalType.RUN_5K: 5.0,
     GoalType.RUN_10K: 10.0,
@@ -84,5 +89,41 @@ GOAL_SPECS: dict[GoalType, GoalSpec] = {
         recommended_hours=6,
         race_pace=0.98,
         quality_long=frozenset({BUILD, PEAK}),
+    ),
+    GoalType.MTB_XC: GoalSpec(
+        min_weeks=8,
+        taper_factors=(0.60,),
+        keys={
+            Sport.BIKE: {
+                BASE: (("bike_sweet_spot", "bike_low_cadence"),),
+                BUILD: (
+                    ("bike_threshold", "bike_over_unders"),
+                    ("bike_vo2max", "bike_mtb_punches"),
+                ),
+                PEAK: (
+                    ("bike_race_starts", "bike_over_unders"),
+                    ("bike_vo2_30_15", "bike_mtb_punches"),
+                ),
+            }
+        },
+        long_max_min={Sport.BIKE: 180, Sport.RUN: 75},
+        recommended_hours=7,
+        technical=True,
+    ),
+    GoalType.MTB_MARATHON: GoalSpec(
+        min_weeks=10,
+        taper_factors=(0.75, 0.55),
+        keys={
+            Sport.BIKE: {
+                BASE: (("bike_sweet_spot", "bike_tempo"),),
+                BUILD: (("bike_threshold", "bike_sweet_spot"), ("bike_vo2max", "bike_mtb_punches")),
+                PEAK: (("bike_over_unders", "bike_threshold"), ("bike_mtb_punches", "bike_vo2max")),
+            }
+        },
+        long_max_min={Sport.BIKE: 300, Sport.RUN: 90},
+        recommended_hours=9,
+        quality_long=frozenset({BUILD, PEAK}),
+        technical=True,
+        long_notes=FUELING_NOTE,
     ),
 }

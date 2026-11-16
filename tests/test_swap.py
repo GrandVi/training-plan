@@ -35,7 +35,7 @@ def test_threshold_session_bike_to_run() -> None:
     assert run.name == "test session [from bike]"
     warmup, main, cooldown = run.steps
     assert isinstance(warmup, Step) and isinstance(cooldown, Step)
-    assert (warmup.kind, warmup.duration_s) == (StepKind.WARMUP, 720)  # run standard warm-up
+    assert (warmup.kind, warmup.duration_s) == (StepKind.WARMUP, 480)  # at least the short one
     assert isinstance(main, Repeat) and main.count == 3
     work, rest = main.steps
     assert isinstance(work, Step) and isinstance(rest, Step)

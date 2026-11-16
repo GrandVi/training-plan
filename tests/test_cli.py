@@ -140,3 +140,33 @@ def test_plan_retarget(plan_path: Path, profile_path: Path, tmp_path: Path) -> N
     watts_before = {step.resolved.power_w for s in old for step in s.flat_steps() if step.resolved}
     watts_after = {step.resolved.power_w for s in new for step in s.flat_steps() if step.resolved}
     assert watts_before != watts_after
+
+
+def test_plan_swap(plan_path: Path, profile_path: Path, tmp_path: Path) -> None:
+    plan = load_plan(plan_path)
+    ride = next(
+        s for s in plan.weeks[5].sessions if s.sport.value == "bike" and s.duration_s >= 5400
+    )
+    base = [
+        "plan",
+        "swap",
+        str(plan_path),
+        "--date",
+        ride.date.isoformat(),
+        "-p",
+        str(profile_path),
+    ]
+    out = tmp_path / "swapped.json"
+    refused = runner.invoke(app, [*base, "-o", str(out), *TODAY])
+    assert refused.exit_code == 1  # one more run breaks the run-volume cap
+    assert "run_volume_ramp" in refused.output and "--force" in refused.output
+    assert not out.exists()
+    forced = runner.invoke(app, [*base, "-o", str(out), "--force", *TODAY])
+    assert forced.exit_code == 0, forced.output
+    swapped = next(s for s in load_plan(out).weeks[5].sessions if s.date == ride.date)
+    assert swapped.sport.value == "run"
+    assert "now a run session" in forced.output
+    nothing = runner.invoke(
+        app, ["plan", "swap", str(plan_path), "--date", "2026-11-16", "-p", str(profile_path)]
+    )
+    assert nothing.exit_code == 1 and "no session on" in nothing.output

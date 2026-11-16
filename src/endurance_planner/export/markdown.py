@@ -61,7 +61,9 @@ def step_lines(blocks: list[Step | Repeat], depth: int = 0) -> list[str]:
             continue
         size = format_duration(block.duration_s)
         if block.distance_m:
-            size = f"{block.distance_m / 1000:g} km (~{size})"
+            metres = block.distance_m
+            distance = f"{metres / 1000:g} km" if metres >= 1000 else f"{metres} m"
+            size = f"{distance} (~{size})"
         absolute = block.resolved.label() if block.resolved else ""
         line = f"{pad}- {KIND_PREFIX[block.kind]}{size} @ {block.target.label()}"
         if absolute:

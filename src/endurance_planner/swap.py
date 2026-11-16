@@ -10,21 +10,39 @@ Conversion rules (explicit, per step):
    at run threshold with the default multiplier of 1.25).
 3. Bike -> run only: a repeat made exclusively of efforts above LT1 (e.g.
    over-unders) becomes one continuous cruise block at the mean intensity.
-4. Warm-up and cool-down are replaced by the destination sport's standard ones.
+4. Warm-up and cool-down use the destination sport's standard intensity, with a
+   duration kept between its short and default lengths.
 5. A technical session cannot keep its intent: it becomes plain endurance and a
    warning is returned.
 """
 
+import datetime as dt
 import re
 
-from endurance_planner.load import intensity_factor, is_low_intensity
-from endurance_planner.models.enums import ActivityType, Intent, Sport, StepKind, TargetKind
-from endurance_planner.models.plan import Repeat, Session, Step, Target, flatten
-from endurance_planner.targets import NATIVE_KIND, express_blocks
+from endurance_planner.load import intensity_factor, is_low_intensity, run_impact_multiplier
+from endurance_planner.models.enums import (
+    ActivityType,
+    Intent,
+    Severity,
+    Sport,
+    StepKind,
+    TargetKind,
+    Weekday,
+)
+from endurance_planner.models.issues import Issue
+from endurance_planner.models.plan import Plan, Repeat, Session, Step, Target, flatten
+from endurance_planner.models.profile import Profile
+from endurance_planner.targets import NATIVE_KIND, express_blocks, resolve_session
 from endurance_planner.templates import COOLDOWN_S, RECOVERY, WARMUP, WARMUP_S
-from endurance_planner.zones import DEFAULT_ZONES, ZoneSet, hr_to_if, if_to_hr
+from endurance_planner.thresholds import ResolvedThresholds
+from endurance_planner.validation import validate_plan
+from endurance_planner.zones import DEFAULT_ZONES, ZoneSet, hr_to_if, if_to_hr, zone_set
 
 _MARK = re.compile(r" \[from (bike|run)\]$")
+
+
+class SwapError(ValueError):
+    """The requested swap is not possible (no session, sport not allowed or not available)."""
 
 
 def other_sport(sport: Sport) -> Sport:
@@ -56,18 +74,16 @@ def _impact(sport: Sport, run_impact: float) -> float:
 
 
 def _convert_step(step: Step, source: Sport, dest: Sport, run_impact: float) -> Step:
-    if step.kind in (StepKind.WARMUP, StepKind.COOLDOWN):
-        warmup = step.kind is StepKind.WARMUP
-        low, high = (WARMUP if warmup else RECOVERY)[dest]
-        return Step(
-            kind=step.kind,
-            duration_s=(WARMUP_S if warmup else COOLDOWN_S)[dest][0],
-            target=Target(kind=NATIVE_KIND[dest], low=low, high=high),
-        )
     target = convert_target(step.target, source, dest)
+    if step.kind in (StepKind.WARMUP, StepKind.COOLDOWN):
+        low, high = (WARMUP if step.kind is StepKind.WARMUP else RECOVERY)[dest]
+        target = Target(kind=NATIVE_KIND[dest], low=low, high=high)
     weight_source = intensity_factor(step.target, source) ** 2 * _impact(source, run_impact)
     weight_dest = intensity_factor(target, dest) ** 2 * _impact(dest, run_impact)
     duration = _round_duration(step.duration_s * weight_source / weight_dest)
+    if step.kind in (StepKind.WARMUP, StepKind.COOLDOWN):
+        default, short = (WARMUP_S if step.kind is StepKind.WARMUP else COOLDOWN_S)[dest]
+        duration = min(max(duration, short), default)
     return Step(kind=step.kind, duration_s=duration, target=target, note=step.note)
 
 
@@ -136,3 +152,85 @@ def convert_session(
         }
     )
     return converted, warnings
+
+
+def _scale_blocks(blocks: list[Step | Repeat], factor: float) -> list[Step | Repeat]:
+    out: list[Step | Repeat] = []
+    for block in blocks:
+        if isinstance(block, Repeat):
+            out.append(Repeat(count=block.count, steps=_scale_blocks(block.steps, factor)))
+        else:
+            duration = _round_duration(block.duration_s * factor)
+            out.append(block.model_copy(update={"duration_s": duration, "distance_m": None}))
+    return out
+
+
+def swap_session(
+    plan: Plan, date: dt.date, profile: Profile, thresholds: ResolvedThresholds
+) -> tuple[Plan, list[Issue]]:
+    """Swap the session of `date` to the other sport and re-validate its week.
+
+    Returns the new plan and the issues to show: conversion warnings, plus every
+    validation issue that the swap introduced. The caller decides whether errors
+    are acceptable (the CLI requires --force).
+    """
+    located = [
+        (week, session) for week in plan.weeks for session in week.sessions if session.date == date
+    ]
+    if not located:
+        raise SwapError(f"no session on {date}")
+    week, session = located[0]
+    dest = other_sport(session.sport)
+    rules = profile.availability.swap_rules
+    allowed = (
+        rules.allow_run_instead_of_bike if dest is Sport.RUN else rules.allow_bike_instead_of_run
+    )
+    if not allowed:
+        raise SwapError(f"swap_rules do not allow a {dest} instead of a {session.sport}")
+    if not profile.thresholds.anchored(dest):
+        raise SwapError(f"no usable {dest} threshold in the profile")
+    day = list(Weekday)[date.weekday()]
+    limit_s = profile.availability.weekdays[day].of(dest) * 60
+    if limit_s == 0:
+        raise SwapError(f"no {dest} time on {day}")
+
+    mode = profile.thresholds.target_mode
+    converted, warnings = convert_session(
+        session,
+        run_impact_multiplier(profile),
+        mode.bike if dest is Sport.BIKE else mode.run,
+        zone_set(profile.thresholds.zone_models),
+    )
+    issues = [
+        Issue(severity=Severity.WARNING, code="swap_intent_lost", message=text, week=week.index)
+        for text in warnings
+    ]
+    if converted.duration_s > limit_s:
+        before = converted.duration_s
+        steps = _scale_blocks(converted.steps, limit_s / before * 0.98)
+        converted = converted.model_copy(update={"steps": steps})
+        issues.append(
+            Issue(
+                severity=Severity.WARNING,
+                code="swap_shortened",
+                message=f"{date} {converted.name}: shortened from {before // 60} to "
+                f"{converted.duration_s // 60} min to fit {day}; the load is not fully preserved",
+                week=week.index,
+            )
+        )
+    converted = resolve_session(converted, thresholds)
+
+    weeks = [
+        w.model_copy(update={"sessions": [converted if s is session else s for s in w.sessions]})
+        if w is week
+        else w
+        for w in plan.weeks
+    ]
+    swapped = plan.model_copy(update={"weeks": weeks})
+    known = {(issue.code, issue.week, issue.message) for issue in validate_plan(plan, profile)}
+    issues += [
+        issue
+        for issue in validate_plan(swapped, profile)
+        if (issue.code, issue.week, issue.message) not in known
+    ]
+    return swapped, issues

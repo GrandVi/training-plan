@@ -73,6 +73,17 @@ def generate_plan(profile: Profile, today: dt.date, start: dt.date | None = None
 
     covered = {name for week in weeks for name in (week.goal, *week.races)}
     issues += skeleton_issues + _feasibility_warnings(profile, covered) + scheduler.issues
+    if scheduler.capped_keys:
+        days = ", ".join(day.value for day in scheduler.capped_keys)
+        issues.append(
+            Issue(
+                severity=Severity.WARNING,
+                code="key_sessions_capped_by_day",
+                message=f"{sum(scheduler.capped_keys.values())} key session(s) were shortened "
+                f"to fit the time available on {days}; more minutes on those days would let "
+                "the intervals progress further",
+            )
+        )
     for sport in Sport:
         if sport not in scheduler.enabled:
             has_time = any(day.of(sport) for day in profile.availability.weekdays.values())

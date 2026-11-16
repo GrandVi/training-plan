@@ -16,6 +16,8 @@ from endurance_planner.models.profile import Profile
 from endurance_planner.periodization import PlanningError
 from endurance_planner.planner import generate_plan, retarget_plan
 from endurance_planner.profile_tools import dump_profile, starter_profile, zone_report
+from endurance_planner.swap import SwapError, swap_session
+from endurance_planner.thresholds import resolve_thresholds
 from endurance_planner.validation import PlanValidationError, validate_plan
 
 app = typer.Typer(no_args_is_help=True, help="Multi-sport training plan generator.")
@@ -201,3 +203,31 @@ def plan_retarget(
     _print_issues(issues)
     save_plan(updated, out or plan)
     typer.echo(f"wrote {out or plan}", err=True)
+
+
+@plan_app.command("swap")
+def plan_swap(
+    plan: PlanArgument,
+    date: Annotated[str, typer.Option(help="Date of the session to swap (YYYY-MM-DD).")],
+    profile: ProfileOption = Path("profile.yaml"),
+    force: Annotated[
+        bool, typer.Option(help="Write the plan even if the swap breaks a rule.")
+    ] = False,
+    out: Annotated[
+        Path | None, typer.Option("--out", "-o", help="Output file (default: in place).")
+    ] = None,
+    today: TodayOption = None,
+) -> None:
+    """Convert one session to the other sport, preserving intent and impact-weighted load."""
+    loaded, athlete = _plan(plan), _profile(profile)
+    thresholds, _ = resolve_thresholds(athlete, _date(today))
+    try:
+        swapped, issues = swap_session(loaded, _date(date), athlete, thresholds)
+    except SwapError as exc:
+        raise _fail(str(exc)) from exc
+    _print_issues(issues)
+    if any(issue.severity is Severity.ERROR for issue in issues) and not force:
+        raise _fail("swap not applied: it breaks at least one rule (use --force to apply anyway)")
+    save_plan(swapped, out or plan)
+    session = next(s for week in swapped.weeks for s in week.sessions if s.date == _date(date))
+    typer.echo(f"{session.date}: now a {session.sport.value} session, {session.name}", err=True)

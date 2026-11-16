@@ -114,7 +114,7 @@ RUN_PRIORITY = {
 
 PHASE_WHY = {
     Phase.BASE: "Base phase: aerobic foundation first, intensity stays limited.",
-    Phase.BUILD: "Build phase: key sessions progress one step at a time.",
+    Phase.BUILD: "Build phase: quality progresses step by step on top of the aerobic base.",
     Phase.PEAK: "Peak phase: race-specific work while volume holds steady.",
     Phase.TAPER: "Taper: volume drops, short intensity keeps you sharp.",
     Phase.TRANSITION: "Transition week: easy training to recover before the next block.",
@@ -149,7 +149,8 @@ class _Caps:
 @dataclass
 class _Knobs:
     hours_s: float
-    levels: dict[Slot, int | None]  # ladder level per key slot; None = key dropped
+    drops: dict[Slot, int | None]  # rungs below the planned level per key slot; None = no key
+    top: dict[Slot, int]  # planned level per key slot
     quality_long: bool
 
 
@@ -172,6 +173,7 @@ class Scheduler:
         self.rotation: dict[tuple[str, Phase], int] = {}  # (goal, phase) -> loading weeks done
         self.level_s: float | None = None  # current weekly volume level
         self._goal_pace: dict[str, float | None] = {}
+        self.capped_keys: dict[Weekday, int] = {}  # key sessions shortened by the day's minutes
         self.enabled = {
             sport
             for sport in Sport
@@ -269,7 +271,7 @@ class Scheduler:
         profile = self.profile
         limits = profile.preferences.limits
         factor = self._phase_factor(sk)
-        hold = not history or sk.phase is Phase.PEAK
+        hold = not history or sk.phase is Phase.PEAK  # no volume increase in week 1 and in peak
 
         loads = [week_weighted_load(week, self.impact) for week in history]
         ref = reference(loads, baseline_load(profile))
@@ -307,10 +309,10 @@ class Scheduler:
             long_ref = reference(history_s, longest_recent_s(profile, sport)) or LONG_START_S[sport]
             if factor is not None:
                 target = factor * long_ref
-            elif hold:
+            elif not history:
                 target = long_ref
             else:
-                target = longest[sport]
+                target = longest[sport]  # the long session keeps growing, peak included
             long_target[sport] = min(target, longest[sport], self._long_max_s(sk.goal, spec, sport))
         return _Caps(load=load, run_s=run, longest_s=longest, long_target_s=long_target)
 
@@ -325,11 +327,15 @@ class Scheduler:
     def _unlocked(self, template: Template) -> bool:
         return not template.prerequisites or any(self.uses.get(t) for t in template.prerequisites)
 
-    def _key_templates(self, sk: WeekSkeleton, spec: GoalSpec, goal_sport: Sport) -> list[Template]:
+    def _key_templates(
+        self, sk: WeekSkeleton, spec: GoalSpec, goal_sport: Sport
+    ) -> list[list[Template]]:
+        """Candidate templates for each key slot, best first. Later candidates are used
+        when the first one does not fit in the day."""
         if sk.phase is Phase.TRANSITION:
             return []
         if sk.race is not None:
-            return [TEMPLATES[OPENERS[goal_sport]]]
+            return [[TEMPLATES[OPENERS[goal_sport]]]]
         phase = Phase.PEAK if sk.phase is Phase.TAPER else sk.phase
         rotations = list(spec.keys[goal_sport].get(phase, ()))
         max_hard = self.profile.preferences.max_hard_sessions_per_week
@@ -341,17 +347,20 @@ class Scheduler:
             limit = 3
         limit -= len(sk.minor_races)
         count = self.rotation.get((sk.goal.name, phase), 0)
-        picked: list[Template] = []
+        slots: list[list[Template]] = []
         for rotation in rotations:
-            if len(picked) >= limit:
+            if len(slots) >= limit:
                 break
             shift = count % len(rotation)
-            for template_id in rotation[shift:] + rotation[:shift]:
-                template = TEMPLATES[template_id]
-                if self._unlocked(template) and template not in picked:
-                    picked.append(template)
-                    break
-        return picked
+            taken = {candidates[0].id for candidates in slots}
+            candidates = [
+                TEMPLATES[template_id]
+                for template_id in rotation[shift:] + rotation[:shift]
+                if self._unlocked(TEMPLATES[template_id]) and template_id not in taken
+            ]
+            if candidates:
+                slots.append(candidates)
+        return slots
 
     def _level(self, sk: WeekSkeleton, template: Template) -> int:
         done = self.uses.get(template.id, 0)
@@ -529,7 +538,11 @@ class Scheduler:
                 take(p, Sport.BIKE)
             elif rules.allow_run_instead_of_bike and can(p, Sport.RUN):
                 take(p, Sport.RUN)  # time-limited day
-        wanted_runs = math.ceil(run_left / 3600) if run_left >= EASY_MIN_S[Sport.RUN] else 0
+        wanted_runs = 0
+        if run_left >= EASY_MIN_S[Sport.RUN]:
+            wanted_runs = math.ceil(run_left / EASY_MAX_S[Sport.RUN])
+            if len(easy) >= 2:
+                wanted_runs = min(wanted_runs, len(easy) - 1)  # keep an easy ride in the week
         # Runs go to the days with the least bike time first.
         for p in sorted(easy, key=lambda p: (self._minutes(p.date, Sport.BIKE), p.date)):
             if wanted_runs > 0 and can(p, Sport.RUN):
@@ -620,13 +633,13 @@ class Scheduler:
         sk: WeekSkeleton,
         spec: GoalSpec,
         placed: list[_Placed],
-        templates: dict[Slot, Template],
+        templates: dict[Slot, list[Template]],
         knobs: _Knobs,
         caps: _Caps,
         eves: set[dt.date],
-    ) -> tuple[list[Session], dict[Slot, int]]:
+    ) -> tuple[list[Session], dict[Slot, tuple[Template, int]]]:
         sessions: list[Session] = []
-        used_levels: dict[Slot, int] = {}
+        used: dict[Slot, tuple[Template, int]] = {}
         left = knobs.hours_s
         run_left = caps.run_s
         easy: list[_Placed] = []
@@ -649,10 +662,9 @@ class Scheduler:
         for p in placed:
             if p.slot not in KEY_SLOTS:
                 continue
-            level = knobs.levels.get(p.slot)
-            built = None
-            if level is not None:
-                template = templates[p.slot]
+            drop = knobs.drops.get(p.slot)
+            for template in templates[p.slot] if drop is not None else []:
+                level = max(0, self._level(sk, template) - (drop or 0))
                 built = self._key_session(sk, p, template, level, cap(p, long_reserve))
                 if (
                     built is None
@@ -661,13 +673,14 @@ class Scheduler:
                     and Sport.BIKE in self.enabled
                 ):
                     # Not enough run volume for a key run: same session on the bike.
-                    p = _Placed(p.slot, p.date, Sport.BIKE)
-                    built = self._key_session(sk, p, template, level, cap(p))
-            if built is None:
-                easy.append(_Placed(Slot.EASY, p.date, p.sport))
+                    on_bike = _Placed(p.slot, p.date, Sport.BIKE)
+                    built = self._key_session(sk, on_bike, template, level, cap(on_bike))
+                if built is not None:
+                    add(built[0])
+                    used[p.slot] = (template, built[1])
+                    break
             else:
-                add(built[0])
-                used_levels[p.slot] = built[1]
+                easy.append(_Placed(Slot.EASY, p.date, p.sport))
 
         for p in placed:
             if p.slot not in LONG_SLOTS:
@@ -688,8 +701,7 @@ class Scheduler:
                     p.sport,
                     long_blocks(p.sport, duration, quality),
                     intent=Intent.ENDURANCE,
-                    name=("Long ride" if p.sport is Sport.BIKE else "Long run")
-                    + (" (day 2)" if second else ""),
+                    name=self._long_name(p.sport, duration, quality, second),
                     what=LONG_2_WHAT if second else LONG_WHAT,
                     notes=spec.long_notes,
                 )
@@ -754,19 +766,33 @@ class Scheduler:
                 )
             )
         sessions.sort(key=lambda s: s.date)
-        return sessions, used_levels
+        return sessions, used
+
+    @staticmethod
+    def _long_name(sport: Sport, duration_s: int, quality: bool, second: bool) -> str:
+        name = "Long ride" if sport is Sport.BIKE else "Long run"
+        if second:
+            return f"{name} (day 2)"
+        if quality and len(long_blocks(sport, duration_s, True)) > 1:
+            return f"{name} with tempo blocks" if sport is Sport.BIKE else f"{name}, steady finish"
+        return name
 
     @staticmethod
     def _lower(knobs: _Knobs) -> bool:
-        """Lower the highest key level by one, or drop the last key. False if nothing is left."""
-        active = {slot: level for slot, level in knobs.levels.items() if level is not None}
+        """Lower the key with the most headroom by one rung, or drop the last key.
+        False if no key is left."""
+        active = [slot for slot, drop in knobs.drops.items() if drop is not None]
         if not active:
             return False
-        slot = max(active, key=lambda s: (active[s], s.value))
-        if active[slot] > 0:
-            knobs.levels[slot] = active[slot] - 1
+
+        def headroom(slot: Slot) -> int:
+            return knobs.top[slot] - (knobs.drops[slot] or 0)
+
+        slot = max(active, key=lambda s: (headroom(s), s.value))
+        if headroom(slot) > 0:
+            knobs.drops[slot] = (knobs.drops[slot] or 0) + 1
         else:
-            knobs.levels[max(active, key=lambda s: s.value)] = None
+            knobs.drops[max(active, key=lambda s: s.value)] = None
         return True
 
     def _fit(
@@ -774,20 +800,24 @@ class Scheduler:
         sk: WeekSkeleton,
         spec: GoalSpec,
         placed: list[_Placed],
-        templates: dict[Slot, Template],
+        templates: dict[Slot, list[Template]],
         hours_s: float,
         caps: _Caps,
         eves: set[dt.date],
-    ) -> tuple[list[Session], dict[Slot, int]]:
+    ) -> tuple[list[Session], dict[Slot, tuple[Template, int]]]:
         knobs = _Knobs(
             hours_s=hours_s,
-            levels={slot: self._level(sk, template) for slot, template in templates.items()},
+            drops=dict.fromkeys(templates, 0),
+            top={
+                slot: max(self._level(sk, t) for t in options)
+                for slot, options in templates.items()
+            },
             quality_long=True,
         )
         max_high = self.profile.preferences.intensity_ratio.high + INTENSITY_TOLERANCE_MESOCYCLE
         budget_s = self.profile.availability.weekly_hours_budget * 3600
         sessions: list[Session] = []
-        used: dict[Slot, int] = {}
+        used: dict[Slot, tuple[Template, int]] = {}
         for _ in range(300):
             sessions, used = self._assemble(sk, spec, placed, templates, knobs, caps, eves)
             total = sum(s.duration_s for s in sessions)
@@ -810,6 +840,13 @@ class Scheduler:
                 if self._lower(knobs):
                     continue
             break
+        for session in sessions:
+            if session.slot in used:
+                template, level = used[session.slot]
+                planned = max(0, self._level(sk, template) - (knobs.drops[session.slot] or 0))
+                if level < planned:
+                    day = WEEKDAYS[session.date.weekday()]
+                    self.capped_keys[day] = self.capped_keys.get(day, 0) + 1
         return sessions, used
 
     # ------------------------------------------------------------------ entry point
@@ -833,8 +870,7 @@ class Scheduler:
         sessions = [resolve_session(session, self.thresholds) for session in sessions]
 
         if not sk.recovery and sk.phase not in (Phase.TAPER, Phase.TRANSITION):
-            for slot, level in used.items():
-                template = templates[slot]
+            for template, level in used.values():
                 self.uses[template.id] = max(self.uses.get(template.id, 0), level + 1)
             key = (sk.goal.name, sk.phase)
             self.rotation[key] = self.rotation.get(key, 0) + 1

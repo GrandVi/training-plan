@@ -106,3 +106,18 @@ def run_10k_profile() -> Profile:
             "current_fitness.longest_recent_session_min": {"bike": 90, "run": 70},
         },
     )
+
+
+def mtb_marathon_profile() -> Profile:
+    """Scenario: MTB marathon in 16 weeks, bike primary, 5 days a week including one run."""
+    return make_profile(
+        goals=[
+            goal(
+                "MTB marathon",
+                dt.date(2027, 3, 7),
+                "mtb_marathon",
+                target={"duration_h": 4.5, "elevation_m": 2500},
+            )
+        ],
+        edits={"current_fitness.weekly_hours": {"bike": 7, "run": 0.75}},
+    )

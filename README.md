@@ -2,7 +2,7 @@
 
 Multi-sport (cycling + running) training plan generator with intervals.icu export.
 
-Status: milestone 2 of 6 (run goals end-to-end: periodization, scheduler, validation, Markdown, CLI). The full README
+Status: milestone 3 of 6 (run and MTB goals, multi-sport weeks, swap). The full README
 (quick start, scientific rationale, how to extend) comes with milestone 6.
 
 ## Development
