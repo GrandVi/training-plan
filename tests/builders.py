@@ -145,3 +145,19 @@ def ultra_profile(sport: str = "bike") -> Profile:
             "current_fitness.longest_recent_session_min": {"bike": 210, "run": 100},
         },
     )
+
+
+def golden_session(template_id: str, level: int, mode: str | None = None) -> Session:
+    """A key session of the example athlete, resolved, for text-rendering tests."""
+    from endurance_planner.targets import express_blocks, resolve_session
+    from endurance_planner.templates import TEMPLATES, key_blocks
+    from endurance_planner.thresholds import resolve_thresholds
+
+    template = TEMPLATES[template_id]
+    blocks = key_blocks(template, level, pace_s=255, goal_pace=1.037)
+    if mode is not None:
+        blocks = express_blocks(blocks, template.sport, mode)
+    base = session(blocks, template.sport).model_copy(
+        update={"rationale": template.rationale, "notes": template.notes, "name": template.name}
+    )
+    return resolve_session(base, resolve_thresholds(make_profile(), TODAY)[0])

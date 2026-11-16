@@ -1,0 +1,9 @@
+Cruise intervals at threshold pace raise the lactate threshold with controlled stress.
+
+- Warm-up 12m 76-86% LTHR
+
+3x
+- 8m 97-101% LTHR
+- Recovery 2m 71-80% LTHR
+
+- Cool-down 8m 71-80% LTHR

@@ -2,7 +2,7 @@
 
 Multi-sport (cycling + running) training plan generator with intervals.icu export.
 
-Status: milestone 4 of 6 (all goal types; intervals.icu export next). The full README
+Status: milestone 5 of 6 (intervals.icu export done; full README next). The full README
 (quick start, scientific rationale, how to extend) comes with milestone 6.
 
 ## Development

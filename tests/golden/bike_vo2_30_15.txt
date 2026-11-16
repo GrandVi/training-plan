@@ -1,0 +1,16 @@
+Short on/off intervals keep oxygen uptake high with repeated accelerations.
+
+- Warm-up 15m 50-70%
+
+8x
+- 30s 120-130%
+- Recovery 15s 45-55%
+
+- Recovery 5m 45-55%
+
+8x
+- 30s 120-130%
+- Recovery 15s 45-55%
+
+- Recovery 5m 45-55%
+- Cool-down 10m 45-55%

@@ -1,12 +1,25 @@
 """Command-line interface. Thin layer: parsing, file I/O and printing only."""
 
 import datetime as dt
+import json
+import os
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from endurance_planner.config import ProfileError, load_profile
+from endurance_planner.export.intervals_icu import (
+    IntervalsClient,
+    IntervalsError,
+    clear_events,
+    load_env_file,
+    plan_events,
+    push_plan,
+    remote_thresholds,
+    threshold_diffs,
+    update_yaml_scalars,
+)
 from endurance_planner.export.json_io import load_plan, save_plan
 from endurance_planner.export.markdown import fitness_csv, render_markdown, weekly_csv
 from endurance_planner.models.enums import GoalType, Severity
@@ -30,6 +43,17 @@ ProfileOption = Annotated[Path, typer.Option("--profile", "-p", help="Athlete pr
 PlanArgument = Annotated[Path, typer.Argument(help="Plan file (JSON).")]
 TodayOption = Annotated[
     str | None, typer.Option("--today", help="Override today's date (YYYY-MM-DD).", hidden=True)
+]
+
+
+AthleteOption = Annotated[
+    str | None,
+    typer.Option(
+        "--athlete-id", help="intervals.icu athlete id (default: INTERVALS_ATHLETE_ID or 0)."
+    ),
+]
+VerboseOption = Annotated[
+    bool, typer.Option("--verbose", "-v", help="Log every request and response.")
 ]
 
 
@@ -73,6 +97,16 @@ def _write(text: str, out: Path | None) -> None:
     else:
         out.write_text(text, encoding="utf-8")
         typer.echo(f"wrote {out}", err=True)
+
+
+def make_client(athlete_id: str | None, verbose: bool) -> IntervalsClient:
+    """intervals.icu client from the environment or a .env file (the key is never stored)."""
+    env = {**load_env_file(), **os.environ}
+    api_key = env.get("INTERVALS_API_KEY")
+    if not api_key:
+        raise _fail("INTERVALS_API_KEY is not set (environment variable or .env file)")
+    log = (lambda message: typer.echo(message, err=True)) if verbose else None
+    return IntervalsClient(api_key, athlete_id or env.get("INTERVALS_ATHLETE_ID", "0"), log=log)
 
 
 # ---------------------------------------------------------------------- profile
@@ -231,3 +265,129 @@ def plan_swap(
     save_plan(swapped, out or plan)
     session = next(s for week in swapped.weeks for s in week.sessions if s.date == _date(date))
     typer.echo(f"{session.date}: now a {session.sport.value} session, {session.name}", err=True)
+
+
+@profile_app.command("sync-intervals")
+def profile_sync_intervals(
+    profile: ProfileOption = Path("profile.yaml"),
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Apply without asking.")] = False,
+    athlete_id: AthleteOption = None,
+    verbose: VerboseOption = False,
+    today: TodayOption = None,
+) -> None:
+    """Compare thresholds with intervals.icu and offer to update the profile."""
+    athlete = _profile(profile)
+    local, _ = resolve_thresholds(athlete, _date(today))
+    try:
+        remote = remote_thresholds(make_client(athlete_id, verbose).athlete())
+    except IntervalsError as exc:
+        raise _fail(str(exc)) from exc
+    diffs = threshold_diffs(local, remote)
+    if not diffs:
+        typer.echo("profile thresholds match intervals.icu")
+        return
+    for diff in diffs:
+        typer.echo(f"  {diff.label}")
+    if not (yes or typer.confirm(f"Write the intervals.icu values to {profile}?", default=False)):
+        typer.echo("profile left unchanged")
+        return
+    text, missing = update_yaml_scalars(
+        profile.read_text(encoding="utf-8"), {diff.path: diff.remote for diff in diffs}
+    )
+    profile.write_text(text, encoding="utf-8")
+    typer.echo(f"updated {profile}")
+    for path in missing:
+        typer.echo(f"  {path} is not in the file: add it by hand")
+
+
+# ---------------------------------------------------------------------- intervals.icu
+@app.command()
+def push(
+    plan: PlanArgument,
+    profile: ProfileOption = Path("profile.yaml"),
+    dry_run: Annotated[bool, typer.Option(help="Print the payloads, no network.")] = False,
+    date_from: Annotated[
+        str | None, typer.Option("--from", help="First date to push (default: today).")
+    ] = None,
+    date_to: Annotated[str | None, typer.Option("--to", help="Last date to push.")] = None,
+    absolute_targets: Annotated[
+        bool, typer.Option(help="Push watts and paces instead of % of threshold.")
+    ] = False,
+    prune: Annotated[
+        bool, typer.Option(help="Delete this plan's events that are no longer in the plan.")
+    ] = True,
+    athlete_id: AthleteOption = None,
+    verbose: VerboseOption = False,
+    today: TodayOption = None,
+) -> None:
+    """Push the plan to the intervals.icu calendar (idempotent: re-running updates)."""
+    loaded = _plan(plan)
+    start = _date(date_from) if date_from else _date(today)
+    end = _date(date_to) if date_to else None
+    if dry_run:
+        typer.echo(json.dumps(plan_events(loaded, start, end, absolute_targets), indent=2))
+        return
+    local, _ = resolve_thresholds(_profile(profile), _date(today))
+    try:
+        client = make_client(athlete_id, verbose)
+        diffs = threshold_diffs(local, remote_thresholds(client.athlete()))
+        if diffs and not absolute_targets:
+            typer.secho(
+                "warning: thresholds differ between the profile and intervals.icu; relative "
+                "targets are resolved by intervals.icu with ITS settings:",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
+            for diff in diffs:
+                typer.secho(f"  {diff.label}", fg=typer.colors.YELLOW, err=True)
+        result = push_plan(
+            client, loaded, start=start, end=end, absolute=absolute_targets, prune=prune
+        )
+    except IntervalsError as exc:
+        raise _fail(str(exc)) from exc
+    typer.echo(f"pushed {result.upserted} workout(s), removed {result.pruned} stale event(s)")
+
+
+@app.command()
+def clear(
+    plan: Annotated[Path | None, typer.Argument(help="Plan whose events are removed.")] = None,
+    all_plans: Annotated[
+        bool, typer.Option(help="Remove the events of every plan pushed by this tool.")
+    ] = False,
+    date_from: Annotated[str | None, typer.Option("--from", help="First date.")] = None,
+    date_to: Annotated[str | None, typer.Option("--to", help="Last date.")] = None,
+    dry_run: Annotated[bool, typer.Option(help="List the events, delete nothing.")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Delete without asking.")] = False,
+    athlete_id: AthleteOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Remove from intervals.icu the events created by this tool, and only those."""
+    plan_id = None
+    oldest = _date(date_from) if date_from else None
+    newest = _date(date_to) if date_to else None
+    if plan is not None and not all_plans:
+        loaded = _plan(plan)
+        plan_id = loaded.id
+        oldest = oldest or loaded.weeks[0].start
+        newest = newest or loaded.weeks[-1].start + dt.timedelta(days=6)
+    elif not all_plans:
+        raise _fail("give a plan file, or --all-plans with --from and --to")
+    if oldest is None or newest is None:
+        raise _fail("--all-plans needs --from and --to")
+    try:
+        client = make_client(athlete_id, verbose)
+        events = clear_events(client, oldest, newest, plan_id, dry_run=True)
+        for event in events:
+            typer.echo(f"  {str(event.get('start_date_local'))[:10]} {event.get('name')}")
+        if not events:
+            typer.echo("no event created by this tool in that window")
+            return
+        if dry_run:
+            typer.echo(f"{len(events)} event(s) would be removed")
+            return
+        if not (yes or typer.confirm(f"Remove these {len(events)} event(s)?", default=False)):
+            raise typer.Exit(code=1)
+        client.delete_events([int(event["id"]) for event in events])
+    except IntervalsError as exc:
+        raise _fail(str(exc)) from exc
+    typer.echo(f"removed {len(events)} event(s)")

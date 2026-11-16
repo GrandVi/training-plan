@@ -1,13 +1,18 @@
+import json
 from pathlib import Path
 
+import httpx
 import pytest
 import yaml
 from typer.testing import CliRunner
 
 from builders import EXAMPLE, example_data
+from endurance_planner import cli
 from endurance_planner.cli import app
 from endurance_planner.config import load_profile
+from endurance_planner.export.intervals_icu import IntervalsClient
 from endurance_planner.export.json_io import load_plan
+from test_intervals_icu import FakeApi
 
 runner = CliRunner()
 TODAY = ["--today", "2026-11-16"]
@@ -170,3 +175,102 @@ def test_plan_swap(plan_path: Path, profile_path: Path, tmp_path: Path) -> None:
         app, ["plan", "swap", str(plan_path), "--date", "2026-11-16", "-p", str(profile_path)]
     )
     assert nothing.exit_code == 1 and "no session on" in nothing.output
+
+
+# ---------------------------------------------------------------------- intervals.icu
+@pytest.fixture
+def fake_api(monkeypatch: pytest.MonkeyPatch) -> FakeApi:
+    api = FakeApi()
+
+    def make_client(athlete_id: str | None, verbose: bool) -> IntervalsClient:
+        return IntervalsClient("key", athlete_id or "0", transport=httpx.MockTransport(api))
+
+    monkeypatch.setattr(cli, "make_client", make_client)
+    return api
+
+
+def test_push_dry_run_prints_payloads_without_network(
+    plan_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_network(athlete_id: str | None, verbose: bool) -> IntervalsClient:
+        raise AssertionError("dry run must not build a client")
+
+    monkeypatch.setattr(cli, "make_client", no_network)
+    args = ["push", str(plan_path), "--dry-run", "--from", "2026-11-23", "--to", "2026-11-29"]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    payloads = json.loads(result.output)
+    assert len(payloads) == len(load_plan(plan_path).weeks[1].sessions)
+    assert all(p["category"] == "WORKOUT" and "%" in p["description"] for p in payloads)
+    assert payloads[0]["external_id"].startswith("endurance-planner:victor-20261116:2026-11-2")
+    absolute = runner.invoke(app, [*args, "--absolute-targets"])
+    assert "/km Pace" in absolute.output
+
+
+def test_push_warns_when_thresholds_differ(
+    plan_path: Path, profile_path: Path, fake_api: FakeApi
+) -> None:
+    args = ["push", str(plan_path), "-p", str(profile_path), *TODAY]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    assert "thresholds differ" in result.output
+    assert "bike FTP (W): profile 260, intervals.icu 265" in result.output
+    count = sum(len(week.sessions) for week in load_plan(plan_path).weeks)
+    assert f"pushed {count} workout(s), removed 0 stale event(s)" in result.output
+    assert len(fake_api.events) == count
+    again = runner.invoke(app, args)
+    assert again.exit_code == 0 and len(fake_api.events) == count  # idempotent
+
+
+def test_push_reports_api_errors(plan_path: Path, profile_path: Path, fake_api: FakeApi) -> None:
+    fake_api.failures = [401]
+    result = runner.invoke(app, ["push", str(plan_path), "-p", str(profile_path), *TODAY])
+    assert result.exit_code == 1
+    assert "authentication failed" in result.output
+
+
+def test_push_needs_an_api_key(
+    plan_path: Path, profile_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("INTERVALS_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)  # no .env here
+    result = runner.invoke(app, ["push", str(plan_path), "-p", str(profile_path), *TODAY])
+    assert result.exit_code == 1
+    assert "INTERVALS_API_KEY is not set" in result.output
+
+
+def test_clear(plan_path: Path, profile_path: Path, fake_api: FakeApi) -> None:
+    runner.invoke(app, ["push", str(plan_path), "-p", str(profile_path), *TODAY])
+    fake_api.events[1] = {"id": 1, "start_date_local": "2026-11-18T00:00:00", "name": "Mine"}
+    count = len(fake_api.events) - 1
+    dry = runner.invoke(app, ["clear", str(plan_path), "--dry-run"])
+    assert f"{count} event(s) would be removed" in dry.output
+    assert len(fake_api.events) == count + 1
+    declined = runner.invoke(app, ["clear", str(plan_path)], input="n\n")
+    assert declined.exit_code == 1 and len(fake_api.events) == count + 1
+    done = runner.invoke(app, ["clear", str(plan_path), "--yes"])
+    assert done.exit_code == 0 and f"removed {count} event(s)" in done.output
+    assert list(fake_api.events) == [1]
+    empty = runner.invoke(
+        app, ["clear", "--all-plans", "--from", "2026-11-01", "--to", "2027-12-31"]
+    )
+    assert "no event created by this tool" in empty.output
+    assert runner.invoke(app, ["clear"]).exit_code == 1
+    assert runner.invoke(app, ["clear", "--all-plans"]).exit_code == 1
+
+
+def test_profile_sync_intervals(tmp_path: Path, fake_api: FakeApi) -> None:
+    profile = tmp_path / "profile.yaml"
+    profile.write_text(EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
+    args = ["profile", "sync-intervals", "-p", str(profile), *TODAY]
+    declined = runner.invoke(app, args, input="n\n")
+    assert "bike FTP (W): profile 260, intervals.icu 265" in declined.output
+    assert "profile left unchanged" in declined.output
+    assert profile.read_text(encoding="utf-8") == EXAMPLE.read_text(encoding="utf-8")
+    accepted = runner.invoke(app, [*args, "--yes"])
+    assert accepted.exit_code == 0, accepted.output
+    updated = load_profile(profile)
+    assert updated.thresholds.bike is not None and updated.thresholds.bike.ftp_w == 265
+    assert updated.thresholds.run is not None and updated.thresholds.run.threshold_pace == 250
+    assert "# [required for bike sessions]" in profile.read_text(encoding="utf-8")  # comments kept
+    assert "profile thresholds match intervals.icu" in runner.invoke(app, args).output
