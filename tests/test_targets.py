@@ -3,7 +3,7 @@ import pytest
 from builders import session, step, two_by_twenty
 from endurance_planner.models.enums import Sport, TargetKind
 from endurance_planner.models.plan import Repeat, Step, Target
-from endurance_planner.targets import resolve_session, resolve_target, zone_target
+from endurance_planner.targets import express_target, resolve_session, resolve_target, zone_target
 from endurance_planner.thresholds import ResolvedThresholds
 from endurance_planner.zones import BUILTIN_ZONE_MODELS
 
@@ -29,7 +29,7 @@ def test_hr_and_rpe_targets(thresholds: ResolvedThresholds) -> None:
     hr = resolve_target(_target(TargetKind.HR, 0.81, 0.89), Sport.BIKE, thresholds)
     assert (hr.power_w, hr.hr_bpm) == (None, (136, 150))
     rpe = resolve_target(_target(TargetKind.RPE, 4, 4), Sport.BIKE, thresholds)
-    assert rpe.label() == "146 bpm"  # RPE 4 -> IF 0.70 -> 86.75% LTHR
+    assert rpe.label() == "150 bpm"  # RPE 4 -> IF 0.75 -> 89% LTHR
 
 
 def test_no_hr_guide_above_threshold(thresholds: ResolvedThresholds) -> None:
@@ -78,3 +78,20 @@ def test_zone_target() -> None:
 def test_invalid_target_range(low: float, high: float) -> None:
     with pytest.raises(ValueError, match="low <= high"):
         _target(TargetKind.POWER, low, high)
+
+
+def test_express_target_in_athlete_mode() -> None:
+    easy = _target(TargetKind.POWER, 0.60, 0.72)
+    assert express_target(easy, Sport.BIKE, "power") is easy
+    as_hr = express_target(easy, Sport.BIKE, "hr")
+    assert (as_hr.kind, as_hr.low, as_hr.high) == (TargetKind.HR, 0.82, 0.88)
+    as_rpe = express_target(easy, Sport.BIKE, "rpe")
+    assert (as_rpe.kind, as_rpe.low, as_rpe.high) == (TargetKind.RPE, 2.5, 3.5)
+    # HR is not usable for short efforts above threshold: falls back to RPE.
+    vo2 = express_target(_target(TargetKind.POWER, 1.08, 1.15), Sport.BIKE, "hr")
+    assert vo2.kind is TargetKind.RPE
+    # Targets that are not in the sport's native unit are left alone.
+    hills = _target(TargetKind.RPE, 8, 9)
+    assert express_target(hills, Sport.RUN, "hr") is hills
+    assert _target(TargetKind.PACE, 0.98, 1.0).label() == "98-100% threshold pace"
+    assert hills.label() == "RPE 8-9"

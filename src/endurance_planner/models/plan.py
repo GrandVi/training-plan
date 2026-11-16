@@ -27,6 +27,10 @@ from endurance_planner.models.profile import Goal
 from endurance_planner.units import format_clock
 
 
+def _span(low: str, high: str) -> str:
+    return low if low == high else f"{low}-{high}"
+
+
 class Target(BaseModel):
     """Relative intensity range.
 
@@ -49,9 +53,11 @@ class Target(BaseModel):
     def mid(self) -> float:
         return (self.low + self.high) / 2
 
-
-def _span(low: str, high: str) -> str:
-    return low if low == high else f"{low}-{high}"
+    def label(self) -> str:
+        if self.kind is TargetKind.RPE:
+            return f"RPE {_span(f'{self.low:g}', f'{self.high:g}')}"
+        unit = {TargetKind.POWER: "FTP", TargetKind.PACE: "threshold pace", TargetKind.HR: "LTHR"}
+        return f"{_span(f'{self.low * 100:.0f}', f'{self.high * 100:.0f}')}% {unit[self.kind]}"
 
 
 class ResolvedTarget(BaseModel):
@@ -132,6 +138,8 @@ class Week(BaseModel):
     start: dt.date  # Monday
     phase: Phase
     recovery: bool = False
+    goal: str = ""  # name of the goal driving this macrocycle
+    races: list[str] = Field(default_factory=list)  # goals raced this week
     sessions: list[Session] = Field(default_factory=list)
 
     @computed_field  # type: ignore[prop-decorator]

@@ -11,6 +11,7 @@ from endurance_planner.zones import (
     hr_to_if,
     hr_zones,
     if_to_hr,
+    if_to_rpe,
     low_ceiling,
     pace_zones,
     power_zones,
@@ -100,8 +101,13 @@ def test_hr_and_rpe_mappings() -> None:
             assert if_to_hr(hr_to_if(hr_fraction, sport), sport) == pytest.approx(hr_fraction)
     assert hr_to_if(0.89, Sport.BIKE) == pytest.approx(0.75)  # top of Z2 on both scales
     assert hr_to_if(0.89, Sport.RUN) == pytest.approx(0.84)
-    assert rpe_to_if(4) == pytest.approx(0.70)
-    assert rpe_to_if(7.5) == pytest.approx(0.975)
+    assert rpe_to_if(4, Sport.BIKE) == pytest.approx(0.75)  # RPE 4 = top of the low zones
+    assert rpe_to_if(4, Sport.RUN) == pytest.approx(0.84)
+    assert rpe_to_if(7.5, Sport.BIKE) == pytest.approx(1.0)
+    for sport in Sport:
+        for rpe in (1, 3.5, 6, 10):
+            assert if_to_rpe(rpe_to_if(rpe, sport), sport) == pytest.approx(rpe)
+    assert if_to_rpe(3.0, Sport.BIKE) == 10
 
 
 def test_zone_tables_follow_available_thresholds(thresholds: ResolvedThresholds) -> None:

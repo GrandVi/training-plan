@@ -35,7 +35,7 @@ def intensity_factor(target: Target, sport: Sport) -> float:
         case TargetKind.HR:
             return hr_to_if(target.mid, sport)
         case TargetKind.RPE:
-            return rpe_to_if(target.mid)
+            return rpe_to_if(target.mid, sport)
         case _:
             return target.mid
 

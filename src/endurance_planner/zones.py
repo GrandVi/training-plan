@@ -76,18 +76,33 @@ HR_TO_IF: dict[Sport, tuple[tuple[float, float], ...]] = {
 }
 
 # (RPE on a 1-10 scale, intensity factor). Coarse fallback when no threshold is known.
-RPE_TO_IF: tuple[tuple[float, float], ...] = (
-    (1, 0.40),
-    (2, 0.50),
-    (3, 0.60),
-    (4, 0.70),
-    (5, 0.80),
-    (6, 0.88),
-    (7, 0.95),
-    (8, 1.00),
-    (9, 1.08),
-    (10, 1.20),
-)
+# RPE 4 is the top of the low-intensity domain in both sports.
+RPE_TO_IF: dict[Sport, tuple[tuple[float, float], ...]] = {
+    Sport.BIKE: (
+        (1, 0.40),
+        (2, 0.55),
+        (3, 0.65),
+        (4, 0.75),
+        (5, 0.83),
+        (6, 0.90),
+        (7, 0.97),
+        (8, 1.03),
+        (9, 1.10),
+        (10, 1.25),
+    ),
+    Sport.RUN: (
+        (1, 0.60),
+        (2, 0.68),
+        (3, 0.76),
+        (4, 0.84),
+        (5, 0.90),
+        (6, 0.95),
+        (7, 0.99),
+        (8, 1.03),
+        (9, 1.09),
+        (10, 1.18),
+    ),
+}
 RPE_LOW_MAX = 4.0  # RPE up to 4 counts as low intensity
 
 
@@ -106,8 +121,13 @@ def if_to_hr(intensity_factor: float, sport: Sport) -> float:
     return _interp(intensity_factor, [(i, h) for h, i in HR_TO_IF[sport]])
 
 
-def rpe_to_if(rpe: float) -> float:
-    return _interp(rpe, RPE_TO_IF)
+def rpe_to_if(rpe: float, sport: Sport) -> float:
+    return _interp(rpe, RPE_TO_IF[sport])
+
+
+def if_to_rpe(intensity_factor: float, sport: Sport) -> float:
+    rpe = _interp(intensity_factor, [(i, r) for r, i in RPE_TO_IF[sport]])
+    return min(10.0, max(1.0, rpe))
 
 
 @dataclass(frozen=True)

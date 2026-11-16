@@ -79,6 +79,14 @@ class Intent(StrEnum):
     RACE_SPECIFIC = "race_specific"
     TECHNICAL = "technical"
 
+    @property
+    def hard(self) -> bool:
+        """Counts as a hard (quality) session for the weekly limit and spacing rules."""
+        return self.value in _HARD_INTENTS
+
+
+_HARD_INTENTS = {"tempo", "sweet_spot", "threshold", "vo2max", "anaerobic", "race_specific"}
+
 
 class Phase(StrEnum):
     BASE = "base"

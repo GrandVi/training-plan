@@ -9,6 +9,8 @@ class Issue(BaseModel):
     severity: Severity
     code: str
     message: str
+    week: int | None = None
 
     def __str__(self) -> str:
-        return f"[{self.severity.value}] {self.code}: {self.message}"
+        where = f" (week {self.week})" if self.week is not None else ""
+        return f"[{self.severity.value}] {self.code}{where}: {self.message}"

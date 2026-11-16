@@ -48,7 +48,7 @@ def test_run_tss_from_pace_hr_and_rpe() -> None:
     # 89% LTHR maps to IF 0.84 (run) / 0.75 (bike)
     assert session([step(3600, 0.89, 0.89, TargetKind.HR)], Sport.RUN).tss == 70.6
     assert session([step(3600, 0.89, 0.89, TargetKind.HR)], Sport.BIKE).tss == 56.2
-    assert session([step(3600, 4, 4, TargetKind.RPE)], Sport.RUN).tss == 49.0
+    assert session([step(3600, 4, 4, TargetKind.RPE)], Sport.RUN).tss == 70.6
 
 
 def test_intensity_split() -> None:

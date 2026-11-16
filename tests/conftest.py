@@ -1,18 +1,15 @@
 from typing import Any
 
 import pytest
-import yaml
 
-from builders import EXAMPLE, TODAY
+from builders import TODAY, example_data
 from endurance_planner.models.profile import Profile
 from endurance_planner.thresholds import ResolvedThresholds, resolve_thresholds
 
 
 @pytest.fixture
 def profile_data() -> dict[str, Any]:
-    data = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
-    assert isinstance(data, dict)
-    return data
+    return example_data()
 
 
 @pytest.fixture
