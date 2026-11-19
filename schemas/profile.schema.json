@@ -100,6 +100,13 @@
         },
         "swap_rules": {
           "$ref": "#/$defs/SwapRules"
+        },
+        "exceptions": {
+          "items": {
+            "$ref": "#/$defs/CalendarException"
+          },
+          "title": "Exceptions",
+          "type": "array"
         }
       },
       "required": [
@@ -109,6 +116,16 @@
       ],
       "title": "Availability",
       "type": "object"
+    },
+    "BikeActivity": {
+      "description": "Kind of bike session a day allows (calendar exceptions, amendments).",
+      "enum": [
+        "road",
+        "mtb",
+        "trainer"
+      ],
+      "title": "BikeActivity",
+      "type": "string"
     },
     "BikeThresholds": {
       "additionalProperties": false,
@@ -184,6 +201,72 @@
         }
       },
       "title": "BikeThresholds",
+      "type": "object"
+    },
+    "CalendarException": {
+      "additionalProperties": false,
+      "description": "A date range planned in advance: no training (off) or other minutes (limited).\n\n`from` and `to` are inclusive; without `to` the range is one day. With `limited`,\n`minutes` sets the minutes of the sports listed (lower or higher than usual, 0 = not\navailable); sports not listed keep their usual minutes. `bike_activity` forces the\nkind of every bike session in the range.",
+      "properties": {
+        "from": {
+          "format": "date",
+          "title": "From",
+          "type": "string"
+        },
+        "to": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "To"
+        },
+        "mode": {
+          "enum": [
+            "off",
+            "limited"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "minutes": {
+          "additionalProperties": {
+            "maximum": 1440,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "propertyNames": {
+            "$ref": "#/$defs/Sport"
+          },
+          "title": "Minutes",
+          "type": "object"
+        },
+        "bike_activity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BikeActivity"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "note": {
+          "default": "",
+          "title": "Note",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "mode"
+      ],
+      "title": "CalendarException",
       "type": "object"
     },
     "CurrentFitness": {

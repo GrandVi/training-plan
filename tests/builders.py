@@ -161,3 +161,22 @@ def golden_session(template_id: str, level: int, mode: str | None = None) -> Ses
         update={"rationale": template.rationale, "notes": template.notes, "name": template.name}
     )
     return resolve_session(base, resolve_thresholds(make_profile(), TODAY)[0])
+
+
+def with_exceptions(profile: Profile, exceptions: list[dict[str, Any]]) -> Profile:
+    """The profile with availability.exceptions replaced (written as in profile.yaml)."""
+    data = profile.model_dump(mode="json", by_alias=True)
+    data["availability"]["exceptions"] = exceptions
+    return Profile.model_validate(data)
+
+
+def free_long_day_profile() -> Profile:
+    """MTB marathon without a duration target: the long ride is capped by Saturday's 240 min."""
+    return make_profile(
+        goals=[goal("MTB marathon", dt.date(2027, 3, 7), "mtb_marathon")],
+        edits={
+            "current_fitness.weekly_hours": {"bike": 8, "run": 0.75},
+            "current_fitness.longest_recent_session_min": {"bike": 220, "run": 40},
+            "availability.weekly_hours_budget": 11,
+        },
+    )

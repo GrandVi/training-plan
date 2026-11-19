@@ -10,6 +10,8 @@ from itertools import pairwise
 
 from endurance_planner.load import intensity_split, run_impact_multiplier, week_weighted_load
 from endurance_planner.models.enums import (
+    ActivityType,
+    BikeActivity,
     GoalType,
     Phase,
     Severity,
@@ -27,8 +29,11 @@ from endurance_planner.rules import (
     INTENSITY_TOLERANCE_WEEK,
     RECOVERY_MAX_RATIO,
     TAPER_MAX_RATIO,
+    baseline_load,
+    break_return,
     load_cap,
     longest_session_cap,
+    reference,
     run_volume_cap,
     week_longest_s,
     week_run_s,
@@ -117,15 +122,45 @@ def _check_availability(plan: Plan, profile: Profile) -> Iterator[Issue]:
                 week,
             )
         for session in week.sessions:
+            yield from _check_day(session, profile, week)
+
+
+def _check_day(session: Session, profile: Profile, week: Week) -> Iterator[Issue]:
+    """Minutes and kind of session allowed on the session's date."""
+    availability = profile.availability
+    allowed = availability.minutes(session.date, session.sport)
+    exception = availability.exception_on(session.date)
+    if exception is None:
+        if session.duration_s > allowed * 60:
             day = WEEKDAYS[session.date.weekday()]
-            allowed = availability.weekdays[day].of(session.sport)
-            if session.duration_s > allowed * 60:
-                yield _error(
-                    "day_limit",
-                    f"{session.date} {session.name}: {_minutes(session.duration_s)} of "
-                    f"{session.sport} but {day} allows {allowed} min",
-                    week,
-                )
+            yield _error(
+                "day_limit",
+                f"{session.date} {session.name}: {_minutes(session.duration_s)} of "
+                f"{session.sport} but {day} allows {allowed} min",
+                week,
+            )
+        return
+    if session.duration_s > allowed * 60:
+        what = (
+            f"no {session.sport} possible"
+            if allowed == 0
+            else f"{_minutes(session.duration_s)} of {session.sport}, {allowed} min allowed"
+        )
+        yield _error(
+            "session_on_unavailable_date",
+            f"{session.date} {session.name}: {what} (exception {exception.label()})",
+            week,
+        )
+    forced = exception.bike_activity
+    if session.sport is Sport.BIKE and forced is not None:
+        activity = ActivityType.MTB if forced is BikeActivity.MTB else ActivityType.RIDE
+        if (session.activity_type, session.indoor) != (activity, forced is BikeActivity.TRAINER):
+            yield _error(
+                "bike_activity_mismatch",
+                f"{session.date} {session.name}: {session.activity_type.value}"
+                f"{' indoors' if session.indoor else ''}, the exception requires {forced}",
+                week,
+            )
 
 
 def _check_progression(plan: Plan, profile: Profile, impact: float) -> Iterator[Issue]:
@@ -165,9 +200,30 @@ def _check_progression(plan: Plan, profile: Profile, impact: float) -> Iterator[
         runs.append(run_s)
 
 
+def _check_return_from_break(plan: Plan, profile: Profile, impact: float) -> Iterator[Issue]:
+    """After a break (calendar exceptions), the first weeks back are capped (rules.py)."""
+    if not plan.weeks or not profile.availability.exceptions:
+        return
+    loads: list[float] = []
+    for week in plan.weeks:
+        load = week_weighted_load(week, impact)
+        back = break_return(profile.availability, week.start, plan.weeks[0].start)
+        if back is not None:
+            cap = back.cap * reference(loads, baseline_load(profile))
+            if load > cap + LOAD_TOLERANCE_TSS:
+                yield _error(
+                    "return_from_break",
+                    f"week {back.week} back after {back.gap_days} days without training: load "
+                    f"{load:.0f} is above {back.cap:.0%} of the reference ({cap:.0f})",
+                    week,
+                )
+        loads.append(load)
+
+
 def _check_recovery_and_taper(plan: Plan, profile: Profile, impact: float) -> Iterator[Issue]:
     max_streak = int(profile.preferences.mesocycle_pattern[0]) + 1
     streak = 0
+    loads: list[float] = []
     for previous, week in pairwise([None, *plan.weeks]):
         if week is None:
             continue
@@ -180,16 +236,23 @@ def _check_recovery_and_taper(plan: Plan, profile: Profile, impact: float) -> It
                 f"{profile.preferences.mesocycle_pattern})",
                 week,
             )
+        load = week_weighted_load(week, impact)
         if week.recovery and previous is not None:
             before = week_weighted_load(previous, impact)
-            load = week_weighted_load(week, impact)
+            what = "the previous week"
+            back = break_return(profile.availability, week.start, plan.weeks[0].start)
+            if back is not None and back.week == 1:
+                # First week back after a break: compare with the weeks before the break.
+                before = reference(loads, baseline_load(profile))
+                what = "the weeks before the break"
             if load > RECOVERY_MAX_RATIO * before + LOAD_TOLERANCE_TSS:
                 yield _error(
                     "recovery_week_too_hard",
-                    f"recovery week load {load:.0f} is more than {RECOVERY_MAX_RATIO:.0%} of the "
-                    f"previous week ({before:.0f})",
+                    f"recovery week load {load:.0f} is more than {RECOVERY_MAX_RATIO:.0%} of "
+                    f"{what} ({before:.0f})",
                     week,
                 )
+        loads.append(load)
 
     if not plan.weeks:
         return
@@ -341,6 +404,7 @@ def validate_plan(plan: Plan, profile: Profile, today: dt.date | None = None) ->
         *_check_availability(plan, profile),
         *_check_progression(plan, profile, impact),
         *_check_recovery_and_taper(plan, profile, impact),
+        *_check_return_from_break(plan, profile, impact),
         *_check_hard_sessions(plan, profile),
         *_check_intensity(plan, profile, zones),
         *_check_targets(plan),

@@ -26,6 +26,7 @@ from endurance_planner.load import (
 )
 from endurance_planner.models.enums import (
     ActivityType,
+    BikeActivity,
     Experience,
     GoalType,
     Intent,
@@ -46,9 +47,11 @@ from endurance_planner.rules import (
     LOAD_STEP_TSS,
     LONG_START_S,
     RAMP_WINDOW,
+    RECOVERY_MAX_RATIO,
     RUN_BOOTSTRAP_S,
     STARTER_VOLUME_S,
     baseline_load,
+    break_return,
     current_run_s,
     load_cap,
     longest_recent_s,
@@ -129,6 +132,11 @@ SUBSTITUTE_WHY = {
     Sport.BIKE: "Done on the bike to keep run volume and impact within their caps.",
     Sport.RUN: "Done as a run because bike time is not available that day.",
 }
+# Same, when a calendar exception removes the template's sport that day.
+EXCEPTION_SUBSTITUTE_WHY = {
+    Sport.BIKE: "Done on the bike because running is not possible that day (calendar exception).",
+    Sport.RUN: "Done as a run because riding is not possible that day (calendar exception).",
+}
 
 
 @dataclass
@@ -177,8 +185,7 @@ class Scheduler:
         self.enabled = {
             sport
             for sport in Sport
-            if profile.thresholds.anchored(sport)
-            and any(day.of(sport) for day in profile.availability.weekdays.values())
+            if profile.thresholds.anchored(sport) and profile.availability.has_time(sport)
         }
 
     # ------------------------------------------------------------------ helpers
@@ -186,7 +193,10 @@ class Scheduler:
         self.issues.append(Issue(severity=Severity.WARNING, code=code, message=message, week=week))
 
     def _minutes(self, date: dt.date, sport: Sport) -> int:
-        return self.profile.availability.weekdays[WEEKDAYS[date.weekday()]].of(sport)
+        return self.profile.availability.minutes(date, sport)
+
+    def _bike_activity(self, date: dt.date) -> BikeActivity | None:
+        return self.profile.availability.bike_activity(date)
 
     def _day_minutes(self, date: dt.date) -> int:
         return max((self._minutes(date, sport) for sport in self.enabled), default=0)
@@ -275,8 +285,13 @@ class Scheduler:
 
         loads = [week_weighted_load(week, self.impact) for week in history]
         ref = reference(loads, baseline_load(profile))
+        plan_start = sk.start - dt.timedelta(weeks=sk.index - 1)
+        back = break_return(profile.availability, sk.start, plan_start)
         if not history:
             load = ref
+        elif sk.recovery and back is not None and back.week == 1:
+            # The break was the recovery: compare with the loading weeks before it.
+            load = min(limits.recovery_week_factor + 0.05, RECOVERY_MAX_RATIO) * ref
         elif sk.recovery:
             load = (limits.recovery_week_factor + 0.05) * loads[-1]
         elif factor is not None:
@@ -284,6 +299,14 @@ class Scheduler:
         else:
             load = max(ref * (1 + self.ramp), ref + LOAD_STEP_TSS)
         load = min(load, load_cap(loads, profile))
+        if back is not None:
+            load = min(load, back.cap * ref)
+            self._warn(
+                "return_from_break",
+                f"week {back.week} back after {back.gap_days} days without training: load "
+                f"capped at {back.cap:.0%} of the reference ({back.cap * ref:.0f})",
+                sk.index,
+            )
 
         run_history = [float(week_run_s(week)) for week in history]
         run_ref = reference(run_history, current_run_s(profile))
@@ -389,6 +412,8 @@ class Scheduler:
         placed: list[_Placed] = []
 
         long_date = sk.start + dt.timedelta(days=WEEKDAYS.index(availability.long_session_day))
+        if any(availability.exception_on(date) for date in dates):
+            long_date = self._long_date(sk, long_date, available, eves)
         if day_count and sk.race is None and long_date in available and long_date not in eves:
             placed.append(_Placed(Slot.LONG, long_date))
             back_to_back = spec.back_to_back and sk.phase in (Phase.BUILD, Phase.PEAK)
@@ -431,12 +456,27 @@ class Scheduler:
         placed.extend(_Placed(Slot.EASY, date) for date in rest[: day_count - len(placed)])
         return sorted(placed, key=lambda p: p.date), eves
 
+    def _long_date(
+        self, sk: WeekSkeleton, usual: dt.date, available: list[dt.date], eves: set[dt.date]
+    ) -> dt.date:
+        """Long-session day of a week with calendar exceptions: the day with the most time
+        for the goal sport, the usual day on a tie (then the closest one)."""
+        sport = self.profile.goal_sport(sk.goal)
+        if sport not in self.enabled:
+            sport = other_sport(sport)
+        options = [date for date in available if date not in eves]
+        if not options:
+            return usual
+        return max(
+            options,
+            key=lambda date: (self._minutes(date, sport), -abs((date - usual).days), date),
+        )
+
     def _placement_score(self, combo: tuple[dt.date, ...], long_dates: set[dt.date]) -> float:
-        indoor = self.profile.availability.indoor_trainer_days
         day = dt.timedelta(days=1)
         score = 0.0
         for date in combo:
-            score += 3.0 if WEEKDAYS[date.weekday()] in indoor else 0.0
+            score += 3.0 if self._bike_activity(date) is BikeActivity.TRAINER else 0.0
             score -= 4.0 if date - day in long_dates else 0.0  # tired legs after the long day
             score -= 1.0 if date + day in long_dates else 0.0
             score += self._day_minutes(date) / 600
@@ -568,7 +608,7 @@ class Scheduler:
         technical: bool = False,
         notes: str = "",
     ) -> Session:
-        indoor_day = WEEKDAYS[p.date.weekday()] in self.profile.availability.indoor_trainer_days
+        indoor_day = self._bike_activity(p.date) is BikeActivity.TRAINER
         indoor = sport is Sport.BIKE and indoor_day and p.slot not in LONG_SLOTS
         mtb_goal = sk.goal.type in (GoalType.MTB_XC, GoalType.MTB_MARATHON)
         off_road = technical or p.slot in LONG_SLOTS or (template is not None and template.mtb)
@@ -621,9 +661,13 @@ class Scheduler:
                     session, _ = convert_session(
                         session, self.impact, self._mode(p.sport), self.zones
                     )
-                    session = session.model_copy(
-                        update={"rationale": f"{session.rationale} {SUBSTITUTE_WHY[p.sport]}"}
-                    )
+                    why = SUBSTITUTE_WHY[p.sport]
+                    availability = self.profile.availability
+                    if availability.exception_on(p.date) and not self._minutes(
+                        p.date, template.sport
+                    ):
+                        why = EXCEPTION_SUBSTITUTE_WHY[p.sport]
+                    session = session.model_copy(update={"rationale": f"{session.rationale} {why}"})
                 if session.duration_s <= cap_s:
                     return session, lv
         return None
@@ -738,11 +782,11 @@ class Scheduler:
             assert p.sport is not None
             if duration < EASY_MIN_S[p.sport]:
                 continue
-            indoor_day = WEEKDAYS[p.date.weekday()] in self.profile.availability.indoor_trainer_days
+            no_skills = self._bike_activity(p.date) in (BikeActivity.TRAINER, BikeActivity.ROAD)
             technical = (
                 not technical_done
                 and p.sport is Sport.BIKE
-                and not indoor_day
+                and not no_skills
                 and not pre_race
                 and duration >= TECHNICAL_MIN_S
             )
@@ -767,6 +811,16 @@ class Scheduler:
             )
         sessions.sort(key=lambda s: s.date)
         return sessions, used
+
+    def _forced_activity(self, session: Session) -> Session:
+        """Bike sessions on days where a calendar exception imposes road, MTB or trainer."""
+        forced = self.profile.availability.forced_bike_activity(session.date)
+        if session.sport is not Sport.BIKE or forced is None:
+            return session
+        activity = ActivityType.MTB if forced is BikeActivity.MTB else ActivityType.RIDE
+        return session.model_copy(
+            update={"activity_type": activity, "indoor": forced is BikeActivity.TRAINER}
+        )
 
     @staticmethod
     def _long_name(sport: Sport, duration_s: int, quality: bool, second: bool) -> str:
@@ -867,7 +921,9 @@ class Scheduler:
         templates = {p.slot: picked[index] for index, p in enumerate(keys)}
 
         sessions, used = self._fit(sk, spec, placed, templates, hours_s, caps, eves)
-        sessions = [resolve_session(session, self.thresholds) for session in sessions]
+        sessions = [
+            resolve_session(self._forced_activity(session), self.thresholds) for session in sessions
+        ]
 
         if not sk.recovery and sk.phase not in (Phase.TAPER, Phase.TRANSITION):
             for template, level in used.values():

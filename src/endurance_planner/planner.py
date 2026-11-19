@@ -3,11 +3,12 @@
 import datetime as dt
 import re
 
-from endurance_planner.models.enums import Severity, Sport
+from endurance_planner.models.enums import Priority, Severity, Sport, Weekday
 from endurance_planner.models.issues import Issue
 from endurance_planner.models.plan import Plan, Week
 from endurance_planner.models.profile import Profile
 from endurance_planner.periodization import PlanningError, build_skeleton, default_start
+from endurance_planner.rules import PRE_RACE_EXCEPTION_DAYS
 from endurance_planner.scheduler import Scheduler
 from endurance_planner.specificity import GOAL_SPECS
 from endurance_planner.targets import resolve_plan
@@ -15,10 +16,12 @@ from endurance_planner.thresholds import resolve_thresholds
 from endurance_planner.validation import assert_valid
 
 
-def _feasibility_warnings(profile: Profile, goal_names: set[str]) -> list[Issue]:
+def _feasibility_warnings(profile: Profile, weeks: list[Week]) -> list[Issue]:
     """Say explicitly when availability is below what a goal typically needs."""
     issues: list[Issue] = []
     availability = profile.availability
+    goal_names = {name for week in weeks for name in (week.goal, *week.races)}
+    long_offset = dt.timedelta(days=list(Weekday).index(availability.long_session_day))
     for goal in profile.goals:
         if goal.name not in goal_names:
             continue
@@ -34,7 +37,10 @@ def _feasibility_warnings(profile: Profile, goal_names: set[str]) -> list[Issue]
                     f"{availability.weekly_hours_budget:g} h. This is the best feasible plan.",
                 )
             )
-        long_minutes = availability.weekdays[availability.long_session_day].of(sport)
+        # Most time the long-session day offers during this goal's weeks (calendar
+        # exceptions included); without exceptions this is the weekly pattern's value.
+        own = [week for week in weeks if week.goal == goal.name] or weeks
+        long_minutes = max(availability.minutes(week.start + long_offset, sport) for week in own)
         wanted = spec.long_max_min[sport]
         if goal.target.duration_h:
             wanted = min(wanted, round(0.8 * goal.target.duration_h * 60))
@@ -47,6 +53,28 @@ def _feasibility_warnings(profile: Profile, goal_names: set[str]) -> list[Issue]
                     f"but {availability.long_session_day} allows {long_minutes} min.",
                 )
             )
+    return issues
+
+
+def exception_warnings(profile: Profile, start: dt.date) -> list[Issue]:
+    """Calendar exceptions in the last days before an A race of the plan."""
+    issues: list[Issue] = []
+    for goal in profile.goals:
+        if goal.priority is not Priority.A or goal.date < start:
+            continue
+        first = goal.date - dt.timedelta(days=PRE_RACE_EXCEPTION_DAYS)
+        last = goal.date - dt.timedelta(days=1)
+        for exception in profile.availability.exceptions:
+            if exception.overlaps(first, last):
+                issues.append(
+                    Issue(
+                        severity=Severity.WARNING,
+                        code="exception_before_race",
+                        message=f"exception {exception.label()} falls in the last "
+                        f"{PRE_RACE_EXCEPTION_DAYS} days before '{goal.name}' ({goal.date}); "
+                        "the taper is planned around it",
+                    )
+                )
     return issues
 
 
@@ -71,8 +99,8 @@ def generate_plan(profile: Profile, today: dt.date, start: dt.date | None = None
     for week in skeleton:
         weeks.append(scheduler.build_week(week, weeks))
 
-    covered = {name for week in weeks for name in (week.goal, *week.races)}
-    issues += skeleton_issues + _feasibility_warnings(profile, covered) + scheduler.issues
+    issues += skeleton_issues + _feasibility_warnings(profile, weeks)
+    issues += exception_warnings(profile, start) + scheduler.issues
     if scheduler.capped_keys:
         days = ", ".join(day.value for day in scheduler.capped_keys)
         issues.append(
@@ -85,17 +113,15 @@ def generate_plan(profile: Profile, today: dt.date, start: dt.date | None = None
             )
         )
     for sport in Sport:
-        if sport not in scheduler.enabled:
-            has_time = any(day.of(sport) for day in profile.availability.weekdays.values())
-            if has_time:
-                issues.append(
-                    Issue(
-                        severity=Severity.WARNING,
-                        code="sport_without_threshold",
-                        message=f"{sport} has available time but no usable threshold; "
-                        f"no {sport} session is planned",
-                    )
+        if sport not in scheduler.enabled and profile.availability.has_time(sport):
+            issues.append(
+                Issue(
+                    severity=Severity.WARNING,
+                    code="sport_without_threshold",
+                    message=f"{sport} has available time but no usable threshold; "
+                    f"no {sport} session is planned",
                 )
+            )
     plan = Plan(
         id=plan_id(profile, start),
         created=today,

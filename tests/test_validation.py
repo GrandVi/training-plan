@@ -5,9 +5,18 @@ from collections.abc import Callable
 
 import pytest
 
-from builders import TODAY, run_10k_profile, step
-from endurance_planner.models.enums import Intent, Phase, Severity, Slot, Sport, TargetKind
+from builders import TODAY, run_10k_profile, step, with_exceptions
+from endurance_planner.models.enums import (
+    ActivityType,
+    Intent,
+    Phase,
+    Severity,
+    Slot,
+    Sport,
+    TargetKind,
+)
 from endurance_planner.models.plan import Plan, Session
+from endurance_planner.models.profile import Profile
 from endurance_planner.planner import generate_plan
 from endurance_planner.validation import PlanValidationError, assert_valid, validate_plan
 
@@ -202,3 +211,47 @@ def test_cross_sport_spacing_is_a_warning_when_allowed(valid_plan: Plan) -> None
     second.sport = Sport.BIKE
     issues = [i for i in validate_plan(plan, profile) if i.code == "hard_session_spacing"]
     assert [issue.severity for issue in issues] == [Severity.WARNING]
+
+
+# ---------------------------------------------------------------------- calendar exceptions
+def _exception_errors(plan: Plan, profile: Profile) -> set[str]:
+    return {i.code for i in validate_plan(plan, profile) if i.severity is Severity.ERROR}
+
+
+def test_session_on_unavailable_date() -> None:
+    off = {"from": "2026-12-21", "to": "2026-12-27", "mode": "off"}
+    trip = {"from": "2026-12-15", "mode": "limited", "minutes": {"bike": 45, "run": 0}}
+    profile = with_exceptions(run_10k_profile(), [off, trip])
+    plan = generate_plan(profile, TODAY)
+    assert _exception_errors(plan, profile) == set()
+    moved = plan.model_copy(deep=True)
+    moved.weeks[5].sessions.append(moved.weeks[6].sessions[0].model_copy(deep=True))
+    moved.weeks[5].sessions[-1].date = dt.date(2026, 12, 22)  # inside the week off
+    assert "session_on_unavailable_date" in _exception_errors(moved, profile)
+    too_long = plan.model_copy(deep=True)
+    week = too_long.weeks[4]
+    week.sessions = [s for s in week.sessions if s.date != dt.date(2026, 12, 15)]
+    ride = next(s for w in too_long.weeks for s in w.sessions if s.sport is Sport.BIKE)
+    week.sessions.append(ride.model_copy(update={"date": dt.date(2026, 12, 15)}, deep=True))
+    assert ride.duration_s > 45 * 60
+    assert "session_on_unavailable_date" in _exception_errors(too_long, profile)
+
+
+def test_bike_activity_mismatch() -> None:
+    mtb_day = {"from": "2026-12-19", "mode": "limited", "minutes": {"run": 0}}
+    profile = with_exceptions(run_10k_profile(), [{**mtb_day, "bike_activity": "mtb"}])
+    plan = generate_plan(profile, TODAY)
+    assert _exception_errors(plan, profile) == set()
+    ride = next(s for s in plan.weeks[4].sessions if s.date == dt.date(2026, 12, 19))
+    ride.activity_type = ActivityType.RIDE
+    assert "bike_activity_mismatch" in _exception_errors(plan, profile)
+
+
+def test_return_from_break() -> None:
+    off = {"from": "2026-12-21", "to": "2026-12-27", "mode": "off"}
+    profile = with_exceptions(run_10k_profile(), [off])
+    plan = generate_plan(profile, TODAY)
+    assert _exception_errors(plan, profile) == set()
+    for session in plan.weeks[6].sessions:  # first week back
+        _stretch(session, 1.15)
+    assert "return_from_break" in _exception_errors(plan, profile)

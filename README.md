@@ -62,12 +62,40 @@ All commands read `profile.yaml` in the current directory unless `-p` is given.
       weekly_hours_budget: 8
       weekdays: {mon: rest, tue: {bike: 60, run: 60}, sat: {bike: 240, run: 120}, ...}
       long_session_day: sat
+      exceptions:                                     # optional, see "Calendar exceptions"
+        - {from: 2027-01-04, to: 2027-01-10, mode: off, note: "ski week"}
     goals:
       - {name: "10k local race", date: 2027-03-14, type: run_10k, priority: A, target: {time: "41:00"}}
 
 The complete, commented file is `examples/profile.example.yaml`. Unknown keys are rejected.
 Thresholds can be estimated (`ftp_20min_w`, `recent_race`); estimates, stale tests (more than
 8 weeks old) and inconsistent values are reported as warnings.
+
+### Calendar exceptions
+
+Dates known in advance are written once in `availability.exceptions` and used every time
+the plan is generated or replanned:
+
+    exceptions:
+      - {from: 2027-01-04, to: 2027-01-10, mode: off, note: "ski week"}
+      - {from: 2027-02-16, mode: limited, minutes: {bike: 45, run: 0}, note: "business trip"}
+      - {from: 2027-03-02, mode: limited, minutes: {run: 0}, bike_activity: mtb}
+      - {from: 2027-03-13, mode: limited, minutes: {bike: 300}, note: "free Saturday"}
+
+- `to` is optional (one day); both ends are inclusive; ranges must not overlap; ranges
+  before the plan start are ignored.
+- `off`: no training. `limited`: `minutes` replaces the day's minutes for the sports listed,
+  lower or higher than usual; sports not listed keep their usual minutes; 0 means "not that
+  sport", so the session goes to the other sport with the usual run/bike conversion.
+  "MTB instead of the run" is `run: 0` with `bike_activity: mtb`.
+- `bike_activity: road | mtb | trainer` forces the kind of every bike session in the range.
+- Phases and goal dates never move; only the sessions change. A raised day does not bypass
+  the ramp caps (the free Saturday above gives a long ride of +10% at most), and a reduced
+  week is never compensated later.
+- After 7 or more consecutive days without training the first week back is capped at 85% of
+  the reference load (highest of the last 4 weeks); after 14 or more days, 70% then 85%.
+- An A goal inside an `off` range is an error; an exception in the 10 days before an A race
+  is a warning. `plan show` marks the weeks with an exception (`*`).
 
 **Editor support.** The first line of a profile names its JSON Schema:
 
@@ -110,6 +138,8 @@ the schema's URL on GitHub; to work offline or to match an older installed versi
 | Long session | Longest session per sport at most +10% (or +5 min) a week, up to a goal-specific ceiling | `limits.max_long_session_increase`, `specificity.py` |
 | Starting load | Week 1 is at most the current load (from `current_fitness`), long session at most the longest recent one | `rules.BASELINE_IF` |
 | Hard sessions | At most 2 a week (3 only in peak when `max_hard_sessions_per_week: 3`), at least 48 h apart across both sports, never the day after the long session if avoidable | `preferences`, `rules.py` |
+| Return from a break | After 7+ days without training (calendar exceptions), the first week back is at most 85% of the reference load; after 14+ days, 70% then 85% | `rules.RETURN_FROM_BREAK` |
+| Calendar exceptions | No session on an unavailable date or above that date's minutes; forced bike activity respected | `availability.exceptions` |
 | Run impact | Run TSS x 1.25 (x 1.40 with injury notes) for ramp limits only; no hard or long run on consecutive days; run frequency cap | `limits`, `swap_rules.max_runs_per_week` |
 | Taper (Mujika & Padilla; Bosquet et al.) | Volume x 0.60 for one week (5k, 10k, XC) or x 0.75 then x 0.55 (half, MTB marathon, ultra); intensity kept with short openers | `specificity.py` |
 | Specificity | 10k: threshold, race-pace and VO2max runs, bike as support. MTB: threshold, VO2max, punches, race starts, skills rides. Ultra: one key a week, back-to-back long days, fueling notes, no VO2max block | `specificity.py` |
@@ -240,6 +270,30 @@ Planning:
 - Distance-based reps keep `distance_m`; their duration is re-estimated on retargeting.
 - A weekday missing from `availability.weekdays` is a rest day.
 
+Calendar exceptions:
+- Every availability lookup (scheduler, validation, swap, feasibility warning) goes through
+  `Availability.minutes(date, sport)`; trainer and MTB choices go through
+  `Availability.bike_activity(date)`. Without exceptions both return the weekly pattern, so
+  existing plans are unchanged (checked by `tests/test_regression.py`).
+- A "day without training" is a day on which no sport has minutes. Without exceptions this
+  never lasts 7 days, so the return-from-break rule only follows exceptions. Days before the
+  plan start do not count. The first week back is the week of the first possible training
+  day after the break.
+- A recovery week that is also the first week back is compared with the weeks before the
+  break (the break was the recovery), not with the empty week before it.
+- In a week with an exception, the long session goes to the day with the most time for the
+  goal sport (the usual day on a tie, then the closest one), so a lost or limited long day
+  moves the long session and a free day attracts it.
+- `bike_activity: trainer` makes every bike session indoor, long ones included (the weekly
+  `indoor_trainer_days` keep long sessions outdoors); `road` and `trainer` days get no MTB
+  skills session. A key run moved to the bike because running is not possible says so in
+  its rationale.
+- `limited` ranges on an A race date are accepted (only `off` is refused): the race day has
+  no session anyway.
+- The `long_day_below_goal_needs` warning uses the most minutes the long-session day offers
+  during the goal's weeks.
+- A sport counts as available if the weekly pattern or an exception gives it minutes.
+
 Tooling:
 - `mypy` checks against the running interpreter (no pinned `python_version`); `ruff` targets 3.11.
 - CI (GitHub Actions) runs `pytest`, `ruff check`, `ruff format --check` and `mypy` on
@@ -261,6 +315,9 @@ Tooling:
   `GoalSpec` in `specificity.py`. The property test then covers it automatically.
 - **New rule**: put the numbers in `rules.py`, a check in `validation.py` (returning an
   `Issue`), and make the scheduler respect it; add a tampering case in `tests/test_validation.py`.
+- **Calendar rule**: read availability only through `Availability.minutes(date, sport)` and
+  `Availability.bike_activity(date)`, so exceptions apply everywhere; break caps are in
+  `rules.RETURN_FROM_BREAK`.
 - **Tuning**: athlete-level caps are in `preferences.limits`; scheduling constants are at the
   top of `scheduler.py`; zone tables and HR / RPE mappings are in `zones.py`.
 - **Plan file format**: add new plan fields as optional with a default that describes older

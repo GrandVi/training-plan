@@ -13,7 +13,7 @@ from endurance_planner.load import (
 )
 from endurance_planner.models.enums import Sport, StepKind
 from endurance_planner.models.plan import Plan, Repeat, Session, Step, Week
-from endurance_planner.models.profile import Profile
+from endurance_planner.models.profile import CalendarException, Profile
 from endurance_planner.rules import baseline_tss
 from endurance_planner.thresholds import resolve_thresholds
 from endurance_planner.units import format_clock
@@ -132,6 +132,12 @@ def fitness_csv(plan: Plan, profile: Profile) -> str:
     return buffer.getvalue()
 
 
+def week_exceptions(week: Week, profile: Profile) -> list[CalendarException]:
+    """Calendar exceptions that touch the week."""
+    last = week.start + dt.timedelta(days=6)
+    return [e for e in profile.availability.exceptions if e.overlaps(week.start, last)]
+
+
 def _session_block(session: Session) -> list[str]:
     tags = [session.slot.value, session.intent.value]
     if session.indoor:
@@ -223,6 +229,7 @@ def render_markdown(
     for week in plan.weeks:
         row = week_row(week, impact, zones)
         phase = row["phase"] + (" (rec)" if week.recovery else "")
+        phase += " \\*" if week_exceptions(week, profile) else ""
         keys = row["key_sessions"] or "-"
         if week.races:
             keys += f" / RACE: {row['races']}"
@@ -232,6 +239,8 @@ def render_markdown(
             f"| {row['low_pct']}/{row['high_pct']} | {keys} |"
         )
     out.append("")
+    if any(week_exceptions(week, profile) for week in plan.weeks):
+        out += ["\\* calendar exception this week (see the week details)", ""]
     if details:
         for week in plan.weeks:
             if weeks is not None and week.index not in weeks:
@@ -240,6 +249,8 @@ def render_markdown(
             out += [f"## Week {week.index} - {label} ({week.start})", ""]
             if week.races:
                 out += [f"Race this week: {', '.join(week.races)}", ""]
+            for exception in week_exceptions(week, profile):
+                out += [f"Calendar exception: {exception.label()}", ""]
             for session in week.sessions:
                 out += _session_block(session)
     return "\n".join(out).rstrip() + "\n"

@@ -3,12 +3,14 @@ the validator (to check them). Tune the constants here; per-athlete caps live in
 profile.preferences.limits.
 """
 
+import datetime as dt
 from collections.abc import Sequence
+from typing import NamedTuple
 
 from endurance_planner.load import run_impact_multiplier, tss
 from endurance_planner.models.enums import Sport
 from endurance_planner.models.plan import Week
-from endurance_planner.models.profile import Profile
+from endurance_planner.models.profile import Availability, Profile
 
 # Ramp caps compare a week with the highest value of the previous RAMP_WINDOW weeks,
 # so the week after a recovery week is compared with the last loading weeks.
@@ -34,6 +36,16 @@ RECOVERY_MAX_RATIO = 0.80
 TAPER_MAX_RATIO = 0.75
 # Minimum days between two hard sessions (2 = at least 48 h, never on consecutive days).
 HARD_MIN_GAP_DAYS = 2
+
+# Return from a break (consecutive days on which no training is possible): load cap of the
+# first weeks back, as a fraction of the reference load (highest of the last 4 weeks).
+# Rows are (minimum days without training, caps of the 1st, 2nd... week back), longest first.
+RETURN_FROM_BREAK: tuple[tuple[int, tuple[float, ...]], ...] = (
+    (14, (0.70, 0.85)),
+    (7, (0.85,)),
+)
+# A calendar exception in the last days before an A race gets a warning.
+PRE_RACE_EXCEPTION_DAYS = 10
 
 
 def reference(history: Sequence[float], before: float) -> float:
@@ -90,3 +102,56 @@ def week_run_s(week: Week) -> int:
 
 def week_longest_s(week: Week, sport: Sport) -> int:
     return max((s.duration_s for s in week.sessions if s.sport is sport), default=0)
+
+
+class BreakReturn(NamedTuple):
+    cap: float  # max load of the week, as a fraction of the reference load
+    week: int  # 1 = first week back, 2 = second week back
+    gap_days: int  # length of the break
+
+
+def return_caps(gap_days: int) -> tuple[float, ...]:
+    """Load caps of the weeks back after `gap_days` days without training (may be empty)."""
+    for days, caps in RETURN_FROM_BREAK:
+        if gap_days >= days:
+            return caps
+    return ()
+
+
+def training_possible(availability: Availability, date: dt.date) -> bool:
+    return any(availability.minutes(date, sport) > 0 for sport in Sport)
+
+
+def days_without_training(availability: Availability, day: dt.date, since: dt.date) -> int:
+    """Consecutive days before `day`, back to `since` at most, with no training possible."""
+    count = 0
+    date = day - dt.timedelta(days=1)
+    while date >= since and not training_possible(availability, date):
+        count += 1
+        date -= dt.timedelta(days=1)
+    return count
+
+
+def break_return(
+    availability: Availability, week_start: dt.date, plan_start: dt.date
+) -> BreakReturn | None:
+    """Return-from-break cap of the week starting on `week_start`, if it applies.
+
+    The first week back is the week of the first day with training possible after the
+    break. Days before the plan start do not count. Without calendar exceptions this never
+    applies: every week of the weekly pattern has at least one training day.
+    """
+    depth = max(len(caps) for _, caps in RETURN_FROM_BREAK)
+    for back in range(depth):
+        start = week_start - dt.timedelta(weeks=back)
+        if start < plan_start:
+            return None
+        days = [start + dt.timedelta(days=offset) for offset in range(7)]
+        first = next((day for day in days if training_possible(availability, day)), None)
+        if first is None:
+            return None
+        gap = days_without_training(availability, first, plan_start)
+        caps = return_caps(gap)
+        if back < len(caps):
+            return BreakReturn(caps[back], back + 1, gap)
+    return None

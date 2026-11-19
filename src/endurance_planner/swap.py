@@ -190,7 +190,7 @@ def swap_session(
     if not profile.thresholds.anchored(dest):
         raise SwapError(f"no usable {dest} threshold in the profile")
     day = list(Weekday)[date.weekday()]
-    limit_s = profile.availability.weekdays[day].of(dest) * 60
+    limit_s = profile.availability.minutes(date, dest) * 60
     if limit_s == 0:
         raise SwapError(f"no {dest} time on {day}")
 

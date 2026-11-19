@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from builders import TODAY
-from endurance_planner.models.enums import GoalType, Severity, Weekday
+from builders import TODAY, with_exceptions
+from endurance_planner.models.enums import GoalType, Priority, Severity, Weekday
 from endurance_planner.models.profile import GOAL_SPORT, Profile
 from endurance_planner.planner import generate_plan
 from endurance_planner.specificity import GOAL_SPECS
@@ -140,3 +140,49 @@ def test_random_profiles_give_valid_plans(seed: int) -> None:
             day = Weekday(DAYS[session.date.weekday()])
             assert session.duration_s <= profile.availability.weekdays[day].of(session.sport) * 60
             assert session.rationale
+
+
+def random_exceptions(profile: Profile, seed: int) -> list[dict[str, Any]]:
+    """1 to 3 non-overlapping calendar exceptions inside the plan, none 'off' on an A race.
+
+    Drawn from their own random stream, so random_profile(seed) stays the same.
+    """
+    rng = random.Random(10_000 + seed)
+    last_goal = max(goal.date for goal in profile.goals)
+    span = (last_goal - TODAY).days
+    a_races = {goal.date for goal in profile.goals if goal.priority is Priority.A}
+    taken: list[tuple[dt.date, dt.date]] = []
+    exceptions: list[dict[str, Any]] = []
+    for _ in range(rng.randint(1, 3)):
+        start = TODAY + dt.timedelta(days=rng.randint(0, span))
+        end = start + dt.timedelta(days=rng.choice([0, 0, 1, 3, 6, 9, 13, 16]))
+        if any(start <= b and a <= end for a, b in taken):
+            continue
+        exception: dict[str, Any] = {"from": start.isoformat(), "note": "random"}
+        if end != start:
+            exception["to"] = end.isoformat()
+        off_race = any(start <= race <= end for race in a_races)
+        if rng.random() < 0.4 and not off_race:
+            exception["mode"] = "off"
+        else:
+            exception["mode"] = "limited"
+            sports = rng.sample(["bike", "run"], rng.randint(1, 2))
+            exception["minutes"] = {s: rng.choice([0, 0, 30, 45, 60, 120, 300]) for s in sports}
+            if rng.random() < 0.4:
+                exception["bike_activity"] = rng.choice(["road", "mtb", "trainer"])
+        taken.append((start, end))
+        exceptions.append(exception)
+    return exceptions
+
+
+@pytest.mark.parametrize("seed", range(150))
+def test_random_profiles_with_exceptions_give_valid_plans(seed: int) -> None:
+    profile = with_exceptions(random_profile(seed), random_exceptions(random_profile(seed), seed))
+    plan = generate_plan(profile, TODAY)
+    errors = [i for i in validate_plan(plan, profile) if i.severity is Severity.ERROR]
+    assert errors == []
+    availability = profile.availability
+    for week in plan.weeks:
+        assert len(week.sessions) <= availability.days_per_week
+        for session in week.sessions:
+            assert session.duration_s <= availability.minutes(session.date, session.sport) * 60

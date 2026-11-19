@@ -65,6 +65,15 @@ availability:                   # habits and constraints (hard limits)
     allow_bike_instead_of_run: true
     max_runs_per_week: 3        # run frequency cap (injury prevention)
     no_hard_run_after_hard_bike: true
+  exceptions: []                # dates known in advance (default: none). Bounds are inclusive,
+                                # "to" is optional (one day), ranges must not overlap.
+  # exceptions:
+  #   - {from: 2027-01-04, to: 2027-01-10, mode: off, note: "ski week"}       # no training
+  #   - {from: 2027-02-16, mode: limited, minutes: {bike: 45, run: 0}, note: "business trip"}
+  #   - {from: 2027-03-02, mode: limited, minutes: {run: 0}, bike_activity: mtb}  # MTB, not the run
+  #   - {from: 2027-03-13, mode: limited, minutes: {bike: 300}, note: "free Saturday"}
+  # limited: minutes replace the usual ones for the sports listed (0 = not that sport);
+  # bike_activity: road | mtb | trainer forces the kind of every bike session in the range.
 
 goals:                          # [required] at least one
   - name: "10k local race"

@@ -20,7 +20,14 @@ from pydantic import (
     model_validator,
 )
 
-from endurance_planner.models.enums import Experience, GoalType, Priority, Sport, Weekday
+from endurance_planner.models.enums import (
+    BikeActivity,
+    Experience,
+    GoalType,
+    Priority,
+    Sport,
+    Weekday,
+)
 from endurance_planner.units import format_clock, parse_clock
 
 # 'm:ss' / 'h:mm:ss' in YAML, seconds in memory.
@@ -40,6 +47,8 @@ Clock = Annotated[
     ),
 ]
 Bpm = Annotated[int, Field(gt=60, lt=240)]
+DayMinutes = Annotated[int, Field(ge=0, le=24 * 60)]
+WEEKDAYS = list(Weekday)
 
 # Sport of each goal type; ultra_endurance uses goal.sport or preferences.primary_sport.
 GOAL_SPORT: dict[GoalType, Sport] = {
@@ -191,6 +200,55 @@ def _rest_day_schema(schema: dict[str, Any]) -> None:
     schema["additionalProperties"] = {"anyOf": [minutes, {"const": "rest"}, {"type": "null"}]}
 
 
+class CalendarException(_Strict):
+    """A date range planned in advance: no training (off) or other minutes (limited).
+
+    `from` and `to` are inclusive; without `to` the range is one day. With `limited`,
+    `minutes` sets the minutes of the sports listed (lower or higher than usual, 0 = not
+    available); sports not listed keep their usual minutes. `bike_activity` forces the
+    kind of every bike session in the range.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    start: dt.date = Field(alias="from")
+    end: dt.date | None = Field(None, alias="to")
+    mode: Literal["off", "limited"]
+    minutes: dict[Sport, DayMinutes] = Field(default_factory=dict)
+    bike_activity: BikeActivity | None = None
+    note: str = ""
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        if self.end is not None and self.end < self.start:
+            raise ValueError(f"exception {self.start}: 'to' ({self.end}) is before 'from'")
+        where = f"exception {self.start}"
+        if self.mode == "off" and (self.minutes or self.bike_activity):
+            raise ValueError(f"{where}: mode 'off' takes no minutes or bike_activity")
+        if self.mode == "limited" and not (self.minutes or self.bike_activity):
+            raise ValueError(f"{where}: mode 'limited' needs minutes or bike_activity")
+        return self
+
+    @property
+    def last(self) -> dt.date:
+        return self.end or self.start
+
+    def covers(self, date: dt.date) -> bool:
+        return self.start <= date <= self.last
+
+    def overlaps(self, first: dt.date, last: dt.date) -> bool:
+        return self.start <= last and first <= self.last
+
+    def label(self) -> str:
+        dates = str(self.start) if self.last == self.start else f"{self.start} to {self.last}"
+        details: list[str] = [self.mode]
+        details += [f"{sport} {minutes} min" for sport, minutes in sorted(self.minutes.items())]
+        if self.bike_activity:
+            details.append(f"bike: {self.bike_activity}")
+        note = f" ({self.note})" if self.note else ""
+        return f"{dates} {', '.join(details)}{note}"
+
+
 class Availability(_Strict):
     days_per_week: int = Field(ge=1, le=7)
     weekly_hours_budget: float = Field(gt=0)
@@ -199,6 +257,7 @@ class Availability(_Strict):
     long_session_day: Weekday = Weekday.SAT
     indoor_trainer_days: list[Weekday] = Field(default_factory=list)
     swap_rules: SwapRules = Field(default_factory=SwapRules)
+    exceptions: list[CalendarException] = Field(default_factory=list)
 
     @field_validator("weekdays", mode="before")
     @classmethod
@@ -223,10 +282,58 @@ class Availability(_Strict):
         for day in self.indoor_trainer_days:
             if not self.weekdays[day].bike:
                 raise ValueError(f"indoor_trainer_days: '{day}' has no bike time")
+        ranges = sorted(self.exceptions, key=lambda exc: exc.start)
+        for first, second in zip(ranges, ranges[1:], strict=False):
+            if second.start <= first.last:
+                raise ValueError(
+                    f"exceptions overlap: {first.start}..{first.last} and "
+                    f"{second.start}..{second.last}"
+                )
         return self
 
     def training_days(self) -> list[Weekday]:
         return [day for day in Weekday if self.weekdays[day].bike or self.weekdays[day].run]
+
+    def exception_on(self, date: dt.date) -> CalendarException | None:
+        """Calendar exception covering `date` (the last listed wins if several do)."""
+        found = None
+        for exception in self.exceptions:
+            if exception.covers(date):
+                found = exception
+        return found
+
+    def minutes(self, date: dt.date, sport: Sport) -> int:
+        """Max minutes of `sport` on `date`: the weekly pattern, unless an exception applies.
+
+        This is the only availability lookup used to plan and to check a plan.
+        """
+        usual = self.weekdays[WEEKDAYS[date.weekday()]].of(sport)
+        exception = self.exception_on(date)
+        if exception is None:
+            return usual
+        if exception.mode == "off":
+            return 0
+        return exception.minutes.get(sport, usual)
+
+    def forced_bike_activity(self, date: dt.date) -> BikeActivity | None:
+        """Kind of bike session imposed on `date` by an exception."""
+        exception = self.exception_on(date)
+        return exception.bike_activity if exception is not None else None
+
+    def bike_activity(self, date: dt.date) -> BikeActivity | None:
+        """Kind of bike session on `date`: forced by an exception, else trainer on
+        indoor_trainer_days, else None (the planner chooses road or MTB)."""
+        forced = self.forced_bike_activity(date)
+        if forced is not None:
+            return forced
+        indoor = WEEKDAYS[date.weekday()] in self.indoor_trainer_days
+        return BikeActivity.TRAINER if indoor else None
+
+    def has_time(self, sport: Sport) -> bool:
+        """True if some day of the weekly pattern or some exception has time for `sport`."""
+        if any(day.of(sport) for day in self.weekdays.values()):
+            return True
+        return any(exception.minutes.get(sport, 0) > 0 for exception in self.exceptions)
 
 
 class GoalTarget(_Strict):
@@ -298,6 +405,13 @@ class Profile(_Strict):
         names = [goal.name for goal in self.goals]
         if len(set(names)) != len(names):
             raise ValueError("goal names must be unique")
+        for goal in self.goals:
+            exception = self.availability.exception_on(goal.date)
+            if goal.priority is Priority.A and exception is not None and exception.mode == "off":
+                raise ValueError(
+                    f"A goal '{goal.name}' ({goal.date}) is inside the off range "
+                    f"{exception.label()}"
+                )
         needed = {self.preferences.primary_sport} | {self.goal_sport(g) for g in self.goals}
         for sport in sorted(needed):
             if not self.thresholds.anchored(sport):
