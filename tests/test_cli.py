@@ -1,3 +1,4 @@
+import datetime as dt
 import json
 from pathlib import Path
 
@@ -274,3 +275,133 @@ def test_profile_sync_intervals(tmp_path: Path, fake_api: FakeApi) -> None:
     assert updated.thresholds.run is not None and updated.thresholds.run.threshold_pace == 250
     assert "# [required for bike sessions]" in profile.read_text(encoding="utf-8")  # comments kept
     assert "profile thresholds match intervals.icu" in runner.invoke(app, args).output
+
+
+# ---------------------------------------------------------------------- amendments
+def _copy(plan_path: Path, tmp_path: Path) -> Path:
+    target = tmp_path / "plan.json"
+    target.write_text(plan_path.read_text(encoding="utf-8"), encoding="utf-8")
+    return target
+
+
+def _key_date(path: Path, week: int) -> str:
+    plan = load_plan(path)
+    return next(s.date for s in plan.weeks[week].sessions if s.intent.hard).isoformat()
+
+
+def test_plan_amend_dry_run_then_write(plan_path: Path, profile_path: Path, tmp_path: Path) -> None:
+    path = _copy(plan_path, tmp_path)
+    before = path.read_text(encoding="utf-8")
+    date = _key_date(path, 5)
+    args = ["plan", "amend", str(path), "--date", date, "--minutes", "40", "-p", str(profile_path)]
+    dry = runner.invoke(app, [*args, "--dry-run", *TODAY])
+    assert dry.exit_code == 0, dry.output
+    assert f"{date} amended" in dry.output and "(pinned)" in dry.output
+    assert "amendment a1: 40 min (scope rest)" in dry.output
+    assert "dry run: nothing written" in dry.output
+    assert path.read_text(encoding="utf-8") == before
+    done = runner.invoke(app, [*args, "--reason", "short on time", *TODAY])
+    assert done.exit_code == 0, done.output and f"wrote {path}" in done.output
+    plan = load_plan(path)
+    assert [(a.id, a.minutes, a.reason) for a in plan.amendments] == [("a1", 40, "short on time")]
+    listed = runner.invoke(app, ["plan", "amendments", str(path)])
+    assert listed.output.startswith("a1") and "40 min (scope rest" in listed.output
+    undone = runner.invoke(
+        app, ["plan", "amendments", str(path), "--undo", "a1", "-p", str(profile_path), *TODAY]
+    )
+    assert undone.exit_code == 0, undone.output
+    assert f"{date} undone" in undone.output
+    assert load_plan(path).weeks == load_plan(plan_path).weeks
+    assert runner.invoke(app, ["plan", "amendments", str(path)]).output == "no amendment\n"
+
+
+def test_plan_amend_mtb_instead_of_the_run(
+    plan_path: Path, profile_path: Path, tmp_path: Path
+) -> None:
+    path = _copy(plan_path, tmp_path)
+    run = next(
+        s for s in load_plan(path).weeks[4].sessions if s.sport.value == "run" and not s.intent.hard
+    )
+    args = ["plan", "amend", str(path), "--date", run.date.isoformat(), "--sport", "bike"]
+    result = runner.invoke(app, [*args, "--activity", "mtb", "-p", str(profile_path), *TODAY])
+    assert result.exit_code == 0, result.output
+    assert f"{run.date} amended" in result.output and "-> MountainBikeRide" in result.output
+
+
+def test_plan_amend_refuses_and_forces(plan_path: Path, profile_path: Path, tmp_path: Path) -> None:
+    path = _copy(plan_path, tmp_path)
+    long_run = next(s for s in load_plan(path).weeks[5].sessions if s.slot.value == "long")
+    args = ["plan", "amend", str(path), "--date", long_run.date.isoformat(), "--minutes", "200"]
+    args += ["-p", str(profile_path), *TODAY]
+    refused = runner.invoke(app, args)
+    assert refused.exit_code == 1
+    assert "long_session_ramp" in refused.output and "use --force" in refused.output
+    assert load_plan(path).amendments == []
+    forced = runner.invoke(app, [*args, "--force"])
+    assert forced.exit_code == 0, forced.output
+    assert load_plan(path).amendments[0].force
+    past = runner.invoke(
+        app, ["plan", "amend", str(path), "--date", "2026-11-17", "--skip", "-p", str(profile_path)]
+    )
+    assert past.exit_code == 1 and "past days cannot be amended" in past.output
+    both = runner.invoke(
+        app,
+        [
+            "plan",
+            "amend",
+            str(path),
+            "--date",
+            long_run.date.isoformat(),
+            "--skip",
+            "--minutes",
+            "30",
+            "-p",
+            str(profile_path),
+            *TODAY,
+        ],
+    )
+    assert both.exit_code == 1 and "cannot be combined" in both.output
+
+
+def test_plan_unavailable(plan_path: Path, profile_path: Path, tmp_path: Path) -> None:
+    path = _copy(plan_path, tmp_path)
+    base = ["plan", "unavailable", str(path), "--from", "2026-12-20", "--to", "2026-12-27"]
+    base += ["-p", str(profile_path), *TODAY]
+    result = runner.invoke(app, [*base, "--minutes", "run=0,bike=60", "--reason", "trip"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "unavailable 2026-12-20 to 2026-12-27 limited, bike 60 min, run 0 min (trip)"
+        in result.output
+    )
+    assert "calendar_exception" in result.output
+    plan = load_plan(path)
+    for week in plan.weeks:
+        for s in week.sessions:
+            if dt.date(2026, 12, 20) <= s.date <= dt.date(2026, 12, 27):
+                assert s.sport.value == "bike" and s.duration_s <= 3600
+    bad = runner.invoke(app, [*base, "--minutes", "swim=30"])
+    assert bad.exit_code == 1 and "sport=minutes" in bad.output
+    shown = runner.invoke(app, ["plan", "show", str(path), "-p", str(profile_path), "--no-details"])
+    assert "## Amendments" in shown.output and "\\* calendar exception" in shown.output
+
+
+def test_plan_replan(plan_path: Path, profile_path: Path, tmp_path: Path) -> None:
+    path = _copy(plan_path, tmp_path)
+    same = runner.invoke(
+        app, ["plan", "replan", str(path), "-p", str(profile_path), "--today", "2026-12-10"]
+    )
+    assert same.exit_code == 0, same.output
+    assert "no session changes" in same.output
+    assert load_plan(path).weeks == load_plan(plan_path).weeks
+    edited = tmp_path / "profile.yaml"
+    data = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+    data["availability"]["exceptions"] = [{"from": "2026-12-21", "to": "2026-12-27", "mode": "off"}]
+    edited.write_text(yaml.safe_dump(data), encoding="utf-8")
+    args = ["plan", "replan", str(path), "-p", str(edited), "--today", "2026-12-10"]
+    dry = runner.invoke(app, [*args, "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+    assert "calendar_exception" in dry.output and "dry run: nothing written" in dry.output
+    data["goals"][0]["date"] = "2027-03-21"  # one week later: the structure changes
+    edited.write_text(yaml.safe_dump(data), encoding="utf-8")
+    moved = runner.invoke(app, [*args[:-2], "--today", "2027-01-20"])
+    assert moved.exit_code == 1 and "skeleton_changed" in moved.output

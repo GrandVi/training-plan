@@ -11,6 +11,7 @@ from itertools import pairwise
 from endurance_planner.load import intensity_split, run_impact_multiplier, week_weighted_load
 from endurance_planner.models.enums import (
     ActivityType,
+    AmendmentKind,
     BikeActivity,
     GoalType,
     Phase,
@@ -38,6 +39,7 @@ from endurance_planner.rules import (
     week_longest_s,
     week_run_s,
 )
+from endurance_planner.templates import progress_rung
 from endurance_planner.zones import ZoneSet, zone_set
 
 WEEKDAYS = list(Weekday)
@@ -126,7 +128,10 @@ def _check_availability(plan: Plan, profile: Profile) -> Iterator[Issue]:
 
 
 def _check_day(session: Session, profile: Profile, week: Week) -> Iterator[Issue]:
-    """Minutes and kind of session allowed on the session's date."""
+    """Minutes and kind of session allowed on the session's date. An amended session is
+    explicit: the athlete stated the time is there, so the day's minutes do not apply."""
+    if session.amendment_id is not None:
+        return
     availability = profile.availability
     allowed = availability.minutes(session.date, session.sport)
     exception = availability.exception_on(session.date)
@@ -374,6 +379,65 @@ def _check_intensity(plan: Plan, profile: Profile, zones: ZoneSet) -> Iterator[I
             block, block_low, block_high = [], 0, 0
 
 
+def _check_ladders(plan: Plan) -> Iterator[Issue]:
+    """A key session is at most one rung above the last completed one of its template
+    (a skipped or shortened key session does not count, so the next one repeats the rung)."""
+    done: dict[str, int] = {}
+    for week in plan.weeks:
+        loading = not week.recovery and week.phase not in (Phase.TAPER, Phase.TRANSITION)
+        counted: list[tuple[str, int]] = []
+        for session in week.sessions:
+            rung = progress_rung(session)
+            if session.template_id is None or rung is None:
+                continue
+            if rung > done.get(session.template_id, 0):
+                yield _error(
+                    "ladder_progression",
+                    f"{session.date} {session.name}: rung {rung + 1} of '{session.template_id}' "
+                    f"but only {done.get(session.template_id, 0)} completed before",
+                    week,
+                )
+            counted.append((session.template_id, rung))
+        if loading:
+            for template_id, rung in counted:
+                done[template_id] = max(done.get(template_id, 0), rung + 1)
+
+
+def _check_amendments(plan: Plan) -> Iterator[Issue]:
+    """Amended sessions match the amendment log: each active session amendment has its
+    pinned session (none for a skip), and nothing else is planned on a skipped date."""
+    week_of = {s.date: week for week in plan.weeks for s in week.sessions}
+    sessions = [s for week in plan.weeks for s in week.sessions]
+    active = {a.id: a for a in plan.active_amendments(AmendmentKind.SESSION)}
+    for amendment in active.values():
+        results = [s for s in sessions if s.amendment_id == amendment.id]
+        if amendment.skip:
+            others = [s for s in sessions if s.date == amendment.date and s.amendment_id is None]
+            for session in results + others:
+                yield _error(
+                    "amendment_mismatch",
+                    f"{session.date} {session.name}: planned on a day skipped by "
+                    f"amendment {amendment.id}",
+                    week_of[session.date],
+                )
+        elif len(results) != 1:
+            yield _error(
+                "amendment_mismatch",
+                f"amendment {amendment.id} ({amendment.date}) has {len(results)} session(s) "
+                "in the plan, expected 1",
+            )
+    for session in sessions:
+        if session.amendment_id is not None and (
+            session.amendment_id not in active or not session.pinned
+        ):
+            yield _error(
+                "amendment_mismatch",
+                f"{session.date} {session.name}: amendment {session.amendment_id} is not an "
+                "active amendment of this plan, or the session is not pinned",
+                week_of[session.date],
+            )
+
+
 def _check_targets(plan: Plan) -> Iterator[Issue]:
     for week in plan.weeks:
         for session in week.sessions:
@@ -396,7 +460,11 @@ def _check_targets(plan: Plan) -> Iterator[Issue]:
 
 
 def validate_plan(plan: Plan, profile: Profile, today: dt.date | None = None) -> list[Issue]:
-    """All rule violations of a plan. `today` defaults to the plan's creation date."""
+    """All rule violations of a plan. `today` defaults to the plan's creation date.
+
+    The plan's unavailable amendments are added to the profile's calendar exceptions.
+    """
+    profile = plan.effective_profile(profile)
     zones = zone_set(profile.thresholds.zone_models)
     impact = run_impact_multiplier(profile)
     return [
@@ -407,6 +475,8 @@ def validate_plan(plan: Plan, profile: Profile, today: dt.date | None = None) ->
         *_check_return_from_break(plan, profile, impact),
         *_check_hard_sessions(plan, profile),
         *_check_intensity(plan, profile, zones),
+        *_check_ladders(plan),
+        *_check_amendments(plan),
         *_check_targets(plan),
     ]
 

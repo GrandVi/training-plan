@@ -24,3 +24,11 @@ def format_clock(seconds: float) -> str:
     hours, rest = divmod(round(seconds), 3600)
     minutes, secs = divmod(rest, 60)
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def format_duration(seconds: int) -> str:
+    """Compact duration: 45s, 12m, 1m30s, 1h30m."""
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    text = (f"{hours}h" if hours else "") + (f"{minutes}m" if minutes else "")
+    return text + (f"{secs}s" if secs or not text else "")

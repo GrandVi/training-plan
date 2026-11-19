@@ -255,3 +255,57 @@ def test_return_from_break() -> None:
     for session in plan.weeks[6].sessions:  # first week back
         _stretch(session, 1.15)
     assert "return_from_break" in _exception_errors(plan, profile)
+
+
+# ---------------------------------------------------------------------- amendments
+def test_ladder_progression(valid_plan: Plan) -> None:
+    plan = valid_plan.model_copy(deep=True)
+    tempo = [s for w in plan.weeks for s in w.sessions if s.template_id == "run_tempo"]
+    assert tempo[0].rung == 0 and _errors(plan) == set()
+    tempo[0].rung = 2  # two rungs above anything done before
+    assert "ladder_progression" in _errors(plan)
+
+
+def test_rung_held_after_a_shortened_key_session(valid_plan: Plan) -> None:
+    from endurance_planner.amend import SessionEdit, amend_session
+
+    profile = run_10k_profile()
+    amended = amend_session(
+        valid_plan, profile, TODAY, dt.date(2026, 12, 22), SessionEdit(minutes=40)
+    )
+    assert _errors(amended.plan) == set()
+    plan = amended.plan.model_copy(deep=True)
+    later = next(s for s in plan.weeks[8].sessions if s.template_id == "run_tempo")
+    later.rung = 3  # as if the shortened session had completed rung 3
+    assert "ladder_progression" in _errors(plan)
+
+
+def test_amendment_mismatch(valid_plan: Plan) -> None:
+    from endurance_planner.amend import SessionEdit, amend_session
+
+    profile = run_10k_profile()
+    skip = dt.date(2026, 12, 22)
+    amended = amend_session(valid_plan, profile, TODAY, skip, SessionEdit(skip=True)).plan
+    assert _errors(amended) == set()
+    refilled = amended.model_copy(deep=True)
+    week = refilled.weeks[5]
+    week.sessions.append(valid_plan.weeks[5].sessions[0].model_copy(deep=True))  # back on 22
+    assert "amendment_mismatch" in _errors(refilled)
+    shorter = amend_session(valid_plan, profile, TODAY, skip, SessionEdit(minutes=40)).plan
+    lost = shorter.model_copy(deep=True)
+    pinned = next(s for s in lost.weeks[5].sessions if s.pinned)
+    pinned.pinned = False  # a replan would rebuild it
+    assert "amendment_mismatch" in _errors(lost)
+    orphan = shorter.model_copy(deep=True)
+    orphan.amendments = []
+    assert "amendment_mismatch" in _errors(orphan)
+
+
+def test_amended_sessions_may_exceed_the_day(valid_plan: Plan) -> None:
+    """Explicit means allowed: the day's minutes do not apply to an amended session."""
+    plan = valid_plan.model_copy(deep=True)
+    session = next(s for s in plan.weeks[0].sessions if s.slot is Slot.EASY)
+    _stretch(session, 3.0)
+    assert "day_limit" in _errors(plan)
+    session.amendment_id = "a1"
+    assert "day_limit" not in _errors(plan)

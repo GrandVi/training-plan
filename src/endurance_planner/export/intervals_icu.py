@@ -292,6 +292,7 @@ def _explain(response: httpx.Response) -> str:
 class PushResult:
     upserted: int
     pruned: int
+    unchanged: int = 0  # events already identical in the calendar (only_changed)
 
 
 def tool_events(
@@ -313,23 +314,40 @@ def push_plan(
     end: dt.date | None = None,
     absolute: bool = False,
     prune: bool = True,
+    only_changed: bool = False,
 ) -> PushResult:
     """Upsert the plan's sessions in the window. With `prune`, events of this plan that are
-    in the window but no longer in the plan (e.g. after a regeneration) are deleted."""
+    in the window but no longer in the plan (e.g. after a regeneration) are deleted.
+
+    With `only_changed`, the window is read first and events whose fields are already the
+    ones this tool would send are left alone: after an amendment or a replan only the
+    sessions that changed are written (their external_id did not change).
+    """
     events = plan_events(plan, start, end, absolute)
-    client.upsert_events(events)
+    oldest = start or plan.weeks[0].start
+    newest = end or plan.weeks[-1].start + dt.timedelta(days=6)
+    existing: list[dict[str, Any]] | None = None
+    to_send = events
+    if only_changed:
+        existing = tool_events(client, oldest, newest, plan_prefix(plan.id))
+        remote = {event["external_id"]: event for event in existing}
+        to_send = [event for event in events if not _same(remote.get(event["external_id"]), event)]
+    client.upsert_events(to_send)
     stale: list[int] = []
     if prune:
-        oldest = start or plan.weeks[0].start
-        newest = end or plan.weeks[-1].start + dt.timedelta(days=6)
+        if existing is None:
+            existing = tool_events(client, oldest, newest, plan_prefix(plan.id))
         current = {event["external_id"] for event in events}
-        stale = [
-            int(event["id"])
-            for event in tool_events(client, oldest, newest, plan_prefix(plan.id))
-            if event["external_id"] not in current
-        ]
+        stale = [int(event["id"]) for event in existing if event["external_id"] not in current]
         client.delete_events(stale)
-    return PushResult(upserted=len(events), pruned=len(stale))
+    return PushResult(
+        upserted=len(to_send), pruned=len(stale), unchanged=len(events) - len(to_send)
+    )
+
+
+def _same(remote: dict[str, Any] | None, event: dict[str, Any]) -> bool:
+    """True if the calendar event already has every field this tool sends."""
+    return remote is not None and all(remote.get(key) == value for key, value in event.items())
 
 
 def clear_events(

@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from builders import (
+    EXAMPLE,
     TODAY,
     example_data,
     free_long_day_profile,
@@ -81,6 +82,28 @@ def test_exceptions_are_read_with_from_and_to(tmp_path: Path) -> None:
     assert availability.bike_activity(dt.date(2027, 3, 3)) is None
     assert off.label() == "2027-01-04 to 2027-01-10 off (ski)"
     assert trip.label() == "2027-02-16 limited, bike 45 min, run 0 min"
+
+
+def test_exceptions_as_written_by_hand(tmp_path: Path) -> None:
+    """Unquoted `off` (a boolean in YAML 1.1) and flow mappings, as in the documentation."""
+    text = (EXAMPLE.read_text(encoding="utf-8")).replace(
+        "  exceptions: []",
+        "  exceptions:\n"
+        '    - {from: 2027-01-04, to: 2027-01-10, mode: off, note: "ski week"}\n'
+        "    - {from: 2027-02-16, mode: limited, minutes: {bike: 45, run: 0}}\n"
+        "    - {from: 2027-03-02, mode: limited, minutes: {run: 0}, bike_activity: mtb}\n"
+        "  # exceptions:",
+        1,
+    )
+    path = tmp_path / "profile.yaml"
+    path.write_text(text, encoding="utf-8")
+    off, trip, mtb = load_profile(path).availability.exceptions
+    assert (off.mode, off.note, trip.mode, mtb.bike_activity) == (
+        "off",
+        "ski week",
+        "limited",
+        BikeActivity.MTB,
+    )
 
 
 @pytest.mark.parametrize(

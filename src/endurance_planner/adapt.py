@@ -3,13 +3,14 @@
 Intended flow, for a future version:
 1. read completed activities and wellness from intervals.icu
    (IntervalsClient, GET /athlete/{id}/activities and /wellness),
-2. turn them into DayObservation records,
-3. call adjust_plan(), which keeps the weeks already done as history and rebuilds
-   the remaining weeks with Scheduler.build_week(skeleton_week, history), so that
+2. turn them into DayObservation records, then into weeks of synthetic sessions,
+3. call replan.replan(plan, profile, today, history=those weeks): the weeks done replace
+   the planned ones as the scheduler's history, the progression state is seeded from them
+   and the remaining weeks are rebuilt (pinned sessions from amendments are kept), so that
    every ramp cap is computed from the real load instead of the planned one.
 
-The scheduler already works week by week from a `history` of Week objects, so no
-change to its interface is needed.
+The replanning engine (replan.py) and the pins (scheduler.WeekPins) already exist; only the
+activity reading and the rules of the roadmap's F8 remain.
 """
 
 import datetime as dt

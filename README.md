@@ -26,6 +26,12 @@ Supported goals: `run_5k`, `run_10k`, `run_half_marathon`, `mtb_xc`, `mtb_marath
     endurance-planner plan swap plan.json --date 2026-12-03   # bike <-> run, same intent
     endurance-planner plan retarget plan.json                 # after a new FTP / pace test
 
+    endurance-planner plan amend plan.json --date 2026-12-03 --minutes 40 --dry-run
+    endurance-planner plan amend plan.json --date 2026-12-05 --sport bike --activity mtb
+    endurance-planner plan unavailable plan.json --from 2026-12-20 --to 2026-12-27 --minutes run=0,bike=60
+    endurance-planner plan replan plan.json                   # after editing profile.yaml
+    endurance-planner plan amendments plan.json [--undo a2]
+
     export INTERVALS_API_KEY=...                       # or put it in a .env file (never in git)
     endurance-planner push plan.json --dry-run         # prints the payloads, no network
     endurance-planner push plan.json                   # idempotent: run it again to update
@@ -43,10 +49,14 @@ All commands read `profile.yaml` in the current directory unless `-p` is given.
 | `plan generate` | Builds, validates and writes the plan (JSON, optional Markdown) |
 | `plan show` | Markdown summary, weekly CSV, or daily CTL/ATL/TSB CSV |
 | `plan validate` | Re-checks every rule, exit code 1 on errors |
-| `plan swap` | Converts one session to the other sport and re-validates its week |
+| `plan swap` | Converts one session to the other sport (shortcut for `plan amend --sport <other> --scope session`) |
+| `plan amend` | Changes one session of a running plan: shorter, other sport or bike, easier, skipped, moved; the rest adapts |
+| `plan unavailable` | Makes a date range unavailable or limited, from today on; the rest adapts |
+| `plan replan` | Rebuilds the plan from today after a profile edit; past and pinned sessions stay |
+| `plan amendments` | Lists the amendment log; `--undo ID` removes one and replans |
 | `plan retarget` | Recomputes watts / paces / bpm, structure and dates untouched |
 | `plan schema` | Prints the JSON Schema of `plan.json` |
-| `push` | Upserts workouts to intervals.icu (`--dry-run`, `--from/--to`, `--absolute-targets`) |
+| `push` | Upserts workouts to intervals.icu, only those that changed (`--all`, `--dry-run`, `--from/--to`, `--absolute-targets`) |
 | `clear` | Deletes this tool's events from intervals.icu (`--dry-run`, `--all-plans`) |
 
 ## Profile
@@ -106,6 +116,60 @@ validate the file and complete its keys while you type. `profile init` writes th
 the schema's URL on GitHub; to work offline or to match an older installed version, run
 `endurance-planner profile schema -o profile.schema.json` and point the line at that file.
 
+## Changing a plan in progress
+
+Two kinds of change, one engine:
+
+- **Known in advance**: written in `profile.yaml` (calendar exceptions, new availability,
+  thresholds...). `plan replan plan.json` rebuilds the plan from today.
+- **Decided along the way**: `plan amend` (one session) and `plan unavailable` (a date range)
+  record the change in `plan.json`, pin the amended session and adapt the rest of the plan.
+
+`profile.yaml` is never rewritten by these commands, and nothing is pushed by itself: run
+`push` afterwards (it only writes the events that changed). Every command prints the changes,
+one line per day with a reason code; `--dry-run` prints them and writes nothing.
+
+    endurance-planner plan amend plan.json --date 2026-12-03 --minutes 40          # shorter
+    endurance-planner plan amend plan.json --date 2026-12-05 --sport bike --activity mtb --minutes 90
+                                                                                    # MTB instead of the run
+    endurance-planner plan amend plan.json --date 2026-12-08 --sport run --minutes 50   # run instead of the ride
+    endurance-planner plan amend plan.json --date 2026-12-10 --skip --reason "work trip"
+    endurance-planner plan amend plan.json --date 2026-12-12 --move-to 2026-12-13
+    endurance-planner plan amend plan.json --date 2026-12-14 --intent endurance     # make it easier
+    endurance-planner plan unavailable plan.json --from 2026-12-20 --to 2026-12-27 --minutes run=0,bike=60
+    endurance-planner plan replan plan.json
+    endurance-planner plan amendments plan.json --undo a2
+
+Common options: `--scope session|week|rest` (default `rest`), `--dry-run`, `--reason TEXT`,
+`--force`. Flags combine, except `--skip`.
+
+How the plan follows (numbers in `rules.py`):
+
+| Rule | What happens |
+|---|---|
+| Frozen past | Sessions dated before today never change. The current week is rebuilt around the sessions already done. |
+| Scope | `session`: only that session, then the plan is re-validated. `week`: also the other sessions of its week. `rest` (default): also every later week, because ramp references and ladder progress change. |
+| Shorter | A key session goes down its ladder until it fits (shortened warm-up and cool-down included), then the reps of its first rung are scaled down to 75% at most; shorter than that it becomes plain endurance, with a warning. Other sessions are resized. |
+| Longer | Explicit minutes may exceed the day's usual minutes ("you are stating you can"). A key session gets easy volume before its cool-down. |
+| Other sport / bike type | The swap conversion: same intent, same impact-weighted load. A technical session cannot keep its intent and becomes endurance, with a warning. Without `--minutes`, the result is fitted to the day's minutes for the new sport. |
+| No catch-up | What a skipped or shortened session loses is never made up: the other sessions of its week get at most the volume and load they had before, the next week keeps the spacing of the original sessions, and later weeks only see a lower history. |
+| Rung hold | A key session skipped, made easier, or kept under 80% of its planned length does not advance its ladder; the next one repeats the rung. |
+| Unpinned sessions yield | If the amended session takes their day, breaks the 48 h hard-session spacing or the weekly hard-session limit, the other key session moves to a free day, else becomes an easy session; if the week is over its load cap, the other key sessions go down their ladders and the easy volume shrinks. |
+| Safety caps | Ramp caps, run volume, long session, budget, hard-session rules and intensity distribution always apply. An amendment that breaks one is refused; with `--force` the plan is saved and the broken rules are listed. |
+| Dates | Amendments of past days are refused. A later amendment of the same session supersedes the earlier one (both stay in the log) and keeps the flags it does not change. Applying the same amendment twice changes nothing. |
+| Undo | `--undo` removes the amendment and replans from today: the result is the plan a replan without it gives; an amendment it superseded is active again. |
+| Skeleton | Phases come from the goals. If a goal date edit changes the weeks already started, `plan replan` stops with `skeleton_changed`: generate a new plan instead. |
+
+Reason codes: `amended` (the session you changed, pinned), `skipped`, `moved` (the day it left),
+`yielded_to_amendment` (same week), `rung_held` (next session of a held ladder), `rebalanced`
+(later weeks), `calendar_exception` (inside an exception or unavailable range), `undone`,
+`replanned` (rebuilt from the edited profile).
+
+Amendments live in `plan.json` (`amendments`, and `pinned` / `amendment_id` on sessions); a
+replan never touches a pinned session. A fresh `plan generate` starts clean. The plan id does
+not change, so unchanged sessions keep their intervals.icu event and `push` only updates the
+differences.
+
 ## How a plan is built
 
 1. **Thresholds** (`thresholds.py`): resolve FTP, threshold pace, LTHR; estimate what is missing.
@@ -140,6 +204,8 @@ the schema's URL on GitHub; to work offline or to match an older installed versi
 | Hard sessions | At most 2 a week (3 only in peak when `max_hard_sessions_per_week: 3`), at least 48 h apart across both sports, never the day after the long session if avoidable | `preferences`, `rules.py` |
 | Return from a break | After 7+ days without training (calendar exceptions), the first week back is at most 85% of the reference load; after 14+ days, 70% then 85% | `rules.RETURN_FROM_BREAK` |
 | Calendar exceptions | No session on an unavailable date or above that date's minutes; forced bike activity respected | `availability.exceptions` |
+| Ladder progression | A key session is at most one rung above the last completed one of its template; a key session skipped, made easier or kept under 80% of its length does not count | `rules.KEY_COMPLETED_SHARE` |
+| Amendments | Pinned sessions match the amendment log; no catch-up; unpinned sessions yield; safety caps always apply (see "Changing a plan in progress") | `rules.py` |
 | Run impact | Run TSS x 1.25 (x 1.40 with injury notes) for ramp limits only; no hard or long run on consecutive days; run frequency cap | `limits`, `swap_rules.max_runs_per_week` |
 | Taper (Mujika & Padilla; Bosquet et al.) | Volume x 0.60 for one week (5k, 10k, XC) or x 0.75 then x 0.55 (half, MTB marathon, ultra); intensity kept with short openers | `specificity.py` |
 | Specificity | 10k: threshold, race-pace and VO2max runs, bike as support. MTB: threshold, VO2max, punches, race starts, skills rides. Ultra: one key a week, back-to-back long days, fueling notes, no VO2max block | `specificity.py` |
@@ -171,6 +237,10 @@ A swap keeps the physiological intent and the impact-weighted load of every step
 - the result is fitted to the day's minutes for the new sport (shortened with a warning),
   then the plan is re-validated: `plan swap` refuses a swap that breaks a rule unless `--force`.
 
+`plan swap` is an amendment with scope `session`: the swapped session is pinned and logged,
+so a later replan keeps it. The library function `swap.swap_session` keeps its behaviour
+(no pin, no log) and shares the conversion code (`swap.convert_for_day`) with `amend.py`.
+
 The scheduler uses the same conversion when a key run must be done on the bike because the
 run-volume cap leaves no room for it.
 
@@ -198,6 +268,9 @@ run-volume cap leaves no room for it.
 - **Idempotent**: each event has `external_id = endurance-planner:<plan id>:<date>:<slot>` and
   is upserted (`POST /athlete/{id}/events/bulk?upsert=true`). Events of the same plan that
   are no longer in it are removed in the pushed window (`--no-prune` to keep them).
+- **Only what changed**: `push` first lists the window and leaves alone the events whose
+  fields are already the ones it would send; after an amendment or a replan only the changed
+  sessions are written. `--all` upserts every event.
 - `clear` lists the calendar window, keeps only events whose `external_id` has this tool's
   prefix, and deletes those (`PUT /athlete/{id}/events/bulk-delete`).
 - Timeouts, 429 and 5xx are retried with exponential backoff; 401 / 403 / 404 / 422 give an
@@ -217,8 +290,12 @@ Zwift / FIT files are not generated here: intervals.icu can export them from the
 
 ## Limits
 
-- The plan is not adapted to what you actually do. Regenerate it (same start date keeps the
-  ids) when your availability or fitness changes; `adapt.py` documents the future hook.
+- The plan does not read what you actually do: tell it with `plan amend`, `plan unavailable`
+  or `plan replan` (sessions dated before today are taken as done). Reading completed
+  activities is a future step (`adapt.py`).
+- After an amendment, later weeks are rebuilt from the real (lower) history: their caps can
+  only go down, but their mix can change within them (for example shorter long runs leave
+  run volume for a key session that did not fit before).
 - One session per day; no double days, no strength work, no swimming.
 - Races are not sessions: the race day is kept free and its load is not counted.
 - Load is planned from targets, not measured: real TSS will differ, mostly on variable terrain.
@@ -293,6 +370,8 @@ Calendar exceptions:
 - The `long_day_below_goal_needs` warning uses the most minutes the long-session day offers
   during the goal's weeks.
 - A sport counts as available if the weekly pattern or an exception gives it minutes.
+- `mode: off` may be written unquoted: PyYAML (YAML 1.1) reads it as `false`, which is read
+  back as `off`.
 
 Tooling:
 - `mypy` checks against the running interpreter (no pinned `python_version`); `ruff` targets 3.11.
@@ -305,7 +384,43 @@ Tooling:
   The profile schema is the input form (paces as `"m:ss"`, `rest` days); the plan schema is the
   form the tool writes. Generated profiles point at the schema's URL on the `main` branch.
 - The property-style tests use a seeded `random.Random` (150 profiles) rather than Hypothesis,
-  to keep dependencies minimal.
+  to keep dependencies minimal. The same profiles also get random calendar exceptions and
+  random sequences of 1 to 5 amendments. `jsonschema` is a dev dependency, to check that the
+  example profile matches the published schema.
+
+Changing a plan in progress:
+- `today` splits the plan: sessions before it are done (frozen). The current week is first
+  rebuilt as at generation time and kept if it agrees with what was done; otherwise it is
+  rebuilt around the done sessions. So replanning an unchanged plan changes nothing, on any
+  day of the week.
+- The scheduler state after the kept weeks (volume level, rotations, ladders) is derived from
+  them without rebuilding them. Ladder levels come from `Session.rung`, stored on key
+  sessions; for version 1 plans they are read back from the session names.
+- Scope `rest` rebuilds every week from the current one, not only from the amended week:
+  earlier weeks come out identical unless `profile.yaml` was edited since the last replan
+  (the change list then says `replanned` for them).
+- No catch-up is enforced by building the amended week once without its amendments (the
+  reference) and capping the other sessions at the reference minus the original sessions.
+- "Shorter than 80%" is measured against the planned length in the session's final sport
+  (a run done on the bike is longer for the same load and is not "longer").
+- A session made easier, or reduced to endurance, keeps its `template_id` (it tells which key
+  session of the week it replaces) but has no rung, so its ladder does not advance.
+- `--intent` accepts `endurance` and `recovery` only; a different key session is not an
+  amendment, it is a replan.
+- `--move-to` stays within the same plan week; to move a session to another week, skip it and
+  amend a session of the other week.
+- A later amendment of the same session applies to the session as originally planned, with
+  the earlier amendment's flags unless it gives them again (`--minutes 60` after
+  `--sport bike --activity mtb` gives a 60-min MTB ride).
+- Errors that block an amendment or a replan are the new ones only (same rule and week
+  compared with the plan before), so a rule broken earlier with `--force` does not block
+  every later change. An amended session is explicit: the day's minutes do not apply to it,
+  the safety caps do.
+- `plan unavailable` without `--minutes` is a day off; with `--minutes` the minutes replace the
+  usual ones on every day of the range, rest days included (the same rule as
+  `availability.exceptions`). Plan ranges win over overlapping profile exceptions.
+- `push` compares the calendar events with the fields it sends; if intervals.icu rewrites a
+  field (for example the description), that event is simply sent again.
 
 ## How to extend
 
@@ -323,11 +438,18 @@ Tooling:
 - **Plan file format**: add new plan fields as optional with a default that describes older
   files, bump `PLAN_SCHEMA_VERSION` in `models/plan.py`, extend `migrate_plan_data`, add a
   stored old file under `tests/fixtures/` and regenerate `schemas/` (`plan schema -o ...`).
-- **Front-end**: call `planner.generate_plan`, `swap.swap_session`, `planner.retarget_plan`,
+- **New kind of amendment**: add the field to `amend.SessionEdit` and `models.plan.Amendment`,
+  apply it in `amend.amended_session`, describe it in `SessionEdit.describe`, add a CLI flag
+  and cover it in `tests/test_amend.py` and in the random sequences of `tests/test_property.py`.
+- **Scheduler with fixed sessions**: `Scheduler.build_week(sk, history, pinned=WeekPins(...))`
+  builds a week around fixed sessions; `Scheduler.seed` sets the progression state from weeks
+  already built or done. `replan.replan_plan` combines both.
+- **Front-end**: call `planner.generate_plan`, `amend.amend_session`, `amend.add_unavailable`,
+  `amend.undo_amendment`, `replan.replan`, `swap.swap_session`, `planner.retarget_plan`,
   `validation.validate_plan` and the `export` functions directly; the plan is a pydantic model
   (`Plan > Week > Session > Step | Repeat`) with a stable JSON form.
-- **Adaptation from completed activities**: see `adapt.py`; the scheduler already builds each
-  week from a history of weeks, so real weeks can replace planned ones.
+- **Adaptation from completed activities**: see `adapt.py`; `replan.replan(..., history=weeks)`
+  already rebuilds the remaining weeks from weeks actually done.
 
 ## Development
 
@@ -346,6 +468,7 @@ behaviour shows up as a failing test. Layout:
       rules.py         numeric caps shared by scheduler and validator
       periodization.py templates.py specificity.py scheduler.py planner.py
       swap.py          validation.py            adapt.py (future hook)
+      replan.py        rebuild a running plan   amend.py        amendments (pure functions)
       export/          json_io, markdown (+ CSV), intervals_icu
       schemas.py       JSON Schemas (committed copies in schemas/)
       cli.py           Typer commands

@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 from endurance_planner.load import run_impact_multiplier, tss
-from endurance_planner.models.enums import Sport
+from endurance_planner.models.enums import Intent, Scope, Sport
 from endurance_planner.models.plan import Week
 from endurance_planner.models.profile import Availability, Profile
 
@@ -46,6 +46,38 @@ RETURN_FROM_BREAK: tuple[tuple[int, tuple[float, ...]], ...] = (
 )
 # A calendar exception in the last days before an A race gets a warning.
 PRE_RACE_EXCEPTION_DAYS = 10
+
+# --- amendments of a running plan (amend.py) -------------------------------------------
+# Default reach of an amendment: the amended week and every later week are rebuilt.
+DEFAULT_SCOPE = Scope.REST
+# A key session done at this share of its planned length (or more) completes its rung;
+# skipped or shorter, its ladder does not advance and the next one repeats the rung.
+KEY_COMPLETED_SHARE = 0.80
+# Below the first rung of its ladder, a key session's main set may be scaled down to this
+# share of its length at most; shorter than that, it becomes plain endurance (with a warning).
+KEY_MIN_SCALE = 0.75
+# `--intent` only makes a session easier.
+EASIER_INTENTS = (Intent.ENDURANCE, Intent.RECOVERY)
+# Lost load (skipped or shortened sessions) is never made up by other sessions: the rest of
+# the week is built with the lost volume, load and run time taken off its targets.
+# Unpinned sessions yield to amended ones: when a pinned session takes a day, breaks the
+# 48 h spacing or the weekly hard-session limit, the other key session moves to a free day,
+# else is dropped to an easy session; when the week's load is over its cap, the other key
+# sessions go down their ladders and the easy volume shrinks.
+
+# Reason codes of the changes listed after an amendment or a replan.
+CHANGE_REASONS = {
+    "amended": "the session you changed (pinned)",
+    "skipped": "the session you skipped",
+    "moved": "the session moved away from this day",
+    "yielded_to_amendment": "same week as an amendment: moved, eased or resized to keep the "
+    "week within its rules",
+    "rung_held": "next session of a skipped or shortened key session: the rung is repeated",
+    "rebalanced": "later week rebuilt: ramp references and ladder progress changed",
+    "calendar_exception": "date covered by a calendar exception or an unavailable range",
+    "undone": "amendment undone",
+    "replanned": "rebuilt from the current profile",
+}
 
 
 def reference(history: Sequence[float], before: float) -> float:

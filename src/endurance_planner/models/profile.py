@@ -218,6 +218,12 @@ class CalendarException(_Strict):
     bike_activity: BikeActivity | None = None
     note: str = ""
 
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _yaml_off(cls, value: Any) -> Any:
+        """YAML 1.1 (PyYAML) reads an unquoted `off` as false."""
+        return "off" if value is False else value
+
     @model_validator(mode="after")
     def _check(self) -> Self:
         if self.end is not None and self.end < self.start:

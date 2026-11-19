@@ -165,6 +165,55 @@ def _scale_blocks(blocks: list[Step | Repeat], factor: float) -> list[Step | Rep
     return out
 
 
+def convert_for_day(
+    session: Session, profile: Profile, *, date: dt.date | None = None, fit: bool = True
+) -> tuple[Session, list[tuple[str, str]]]:
+    """The session in the other sport, fitted to the time of its day (swap rules).
+
+    Shared by `swap_session` and amendments (amend.py). `date` is the day the session will be
+    done (default: its own date). With `fit`, the result is shortened to the minutes of the
+    day for the new sport, and a day without that sport is refused; amendments with explicit
+    minutes pass fit=False. Returns the converted session (absolute targets cleared) and
+    notes as (kind, message), kind being "intent_lost" or "shortened".
+    Raises SwapError when the swap rules or the thresholds do not allow the other sport.
+    """
+    date = date or session.date
+    dest = other_sport(session.sport)
+    rules = profile.availability.swap_rules
+    allowed = (
+        rules.allow_run_instead_of_bike if dest is Sport.RUN else rules.allow_bike_instead_of_run
+    )
+    if not allowed:
+        raise SwapError(f"swap_rules do not allow a {dest} instead of a {session.sport}")
+    if not profile.thresholds.anchored(dest):
+        raise SwapError(f"no usable {dest} threshold in the profile")
+    day = list(Weekday)[date.weekday()]
+    limit_s = profile.availability.minutes(date, dest) * 60
+    if fit and limit_s == 0:
+        raise SwapError(f"no {dest} time on {day}")
+
+    mode = profile.thresholds.target_mode
+    converted, warnings = convert_session(
+        session,
+        run_impact_multiplier(profile),
+        mode.bike if dest is Sport.BIKE else mode.run,
+        zone_set(profile.thresholds.zone_models),
+    )
+    notes = [("intent_lost", text) for text in warnings]
+    if fit and converted.duration_s > limit_s:
+        before = converted.duration_s
+        steps = _scale_blocks(converted.steps, limit_s / before * 0.98)
+        converted = converted.model_copy(update={"steps": steps})
+        notes.append(
+            (
+                "shortened",
+                f"{date} {converted.name}: shortened from {before // 60} to "
+                f"{converted.duration_s // 60} min to fit {day}; the load is not fully preserved",
+            )
+        )
+    return converted, notes
+
+
 def swap_session(
     plan: Plan, date: dt.date, profile: Profile, thresholds: ResolvedThresholds
 ) -> tuple[Plan, list[Issue]]:
@@ -180,44 +229,11 @@ def swap_session(
     if not located:
         raise SwapError(f"no session on {date}")
     week, session = located[0]
-    dest = other_sport(session.sport)
-    rules = profile.availability.swap_rules
-    allowed = (
-        rules.allow_run_instead_of_bike if dest is Sport.RUN else rules.allow_bike_instead_of_run
-    )
-    if not allowed:
-        raise SwapError(f"swap_rules do not allow a {dest} instead of a {session.sport}")
-    if not profile.thresholds.anchored(dest):
-        raise SwapError(f"no usable {dest} threshold in the profile")
-    day = list(Weekday)[date.weekday()]
-    limit_s = profile.availability.minutes(date, dest) * 60
-    if limit_s == 0:
-        raise SwapError(f"no {dest} time on {day}")
-
-    mode = profile.thresholds.target_mode
-    converted, warnings = convert_session(
-        session,
-        run_impact_multiplier(profile),
-        mode.bike if dest is Sport.BIKE else mode.run,
-        zone_set(profile.thresholds.zone_models),
-    )
+    converted, notes = convert_for_day(session, profile)
     issues = [
-        Issue(severity=Severity.WARNING, code="swap_intent_lost", message=text, week=week.index)
-        for text in warnings
+        Issue(severity=Severity.WARNING, code=f"swap_{kind}", message=text, week=week.index)
+        for kind, text in notes
     ]
-    if converted.duration_s > limit_s:
-        before = converted.duration_s
-        steps = _scale_blocks(converted.steps, limit_s / before * 0.98)
-        converted = converted.model_copy(update={"steps": steps})
-        issues.append(
-            Issue(
-                severity=Severity.WARNING,
-                code="swap_shortened",
-                message=f"{date} {converted.name}: shortened from {before // 60} to "
-                f"{converted.duration_s // 60} min to fit {day}; the load is not fully preserved",
-                week=week.index,
-            )
-        )
     converted = resolve_session(converted, thresholds)
 
     weeks = [

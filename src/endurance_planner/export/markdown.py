@@ -16,8 +16,19 @@ from endurance_planner.models.plan import Plan, Repeat, Session, Step, Week
 from endurance_planner.models.profile import CalendarException, Profile
 from endurance_planner.rules import baseline_tss
 from endurance_planner.thresholds import resolve_thresholds
-from endurance_planner.units import format_clock
+from endurance_planner.units import format_clock, format_duration
 from endurance_planner.zones import ZoneSet, zone_set
+
+__all__ = [
+    "daily_tss",
+    "fitness_csv",
+    "format_duration",
+    "render_markdown",
+    "step_lines",
+    "week_exceptions",
+    "week_row",
+    "weekly_csv",
+]
 
 KIND_PREFIX = {
     StepKind.WARMUP: "Warm-up ",
@@ -40,14 +51,6 @@ WEEKLY_COLUMNS = [
     "key_sessions",
     "races",
 ]
-
-
-def format_duration(seconds: int) -> str:
-    """Compact duration: 45s, 12m, 1m30s, 1h30m."""
-    hours, rest = divmod(seconds, 3600)
-    minutes, secs = divmod(rest, 60)
-    text = (f"{hours}h" if hours else "") + (f"{minutes}m" if minutes else "")
-    return text + (f"{secs}s" if secs or not text else "")
 
 
 def step_lines(blocks: list[Step | Repeat], depth: int = 0) -> list[str]:
@@ -144,6 +147,8 @@ def _session_block(session: Session) -> list[str]:
         tags.append("indoor")
     if session.technical:
         tags.append("technical")
+    if session.pinned:
+        tags.append(f"pinned by {session.amendment_id}")
     lines = [
         f"#### {session.date:%a %d %b} - {session.activity_type.value}: {session.name}",
         "",
@@ -193,6 +198,9 @@ def render_markdown(
 
     weeks: 1-based week numbers to detail (default: all). details=False keeps the table only.
     """
+    from endurance_planner.amend import amendment_lines  # amend -> replan -> planner
+
+    profile = plan.effective_profile(profile)
     impact = run_impact_multiplier(profile)
     zones = zone_set(profile.thresholds.zone_models)
     last = plan.weeks[-1].start + dt.timedelta(days=6)
@@ -215,6 +223,8 @@ def render_markdown(
     out += ["", "## Thresholds", "", *_threshold_lines(profile, plan.created), ""]
     if plan.warnings:
         out += ["## Warnings", "", *[f"- {issue}" for issue in plan.warnings], ""]
+    if plan.amendments:
+        out += ["## Amendments", "", *[f"- {line}" for line in amendment_lines(plan)], ""]
 
     ratio = profile.preferences.intensity_ratio
     out += [

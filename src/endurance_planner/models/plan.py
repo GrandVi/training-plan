@@ -26,7 +26,7 @@ from endurance_planner.models.enums import (
     TargetKind,
 )
 from endurance_planner.models.issues import Issue
-from endurance_planner.models.profile import Goal
+from endurance_planner.models.profile import CalendarException, Goal, Profile
 from endurance_planner.units import format_clock
 
 
@@ -193,6 +193,23 @@ class Amendment(BaseModel):
     def active(self) -> bool:
         return self.superseded_by is None
 
+    @property
+    def last(self) -> dt.date:
+        """Last day of an unavailable range."""
+        return self.to or self.date
+
+    def as_exception(self) -> CalendarException:
+        """Calendar exception of an unavailable amendment (same rules as the profile's)."""
+        off = not self.day_minutes and self.activity is None
+        return CalendarException(
+            start=self.date,
+            end=self.to,
+            mode="off" if off else "limited",
+            minutes=dict(self.day_minutes),
+            bike_activity=self.activity,
+            note=self.reason or f"amendment {self.id}",
+        )
+
 
 PLAN_SCHEMA_VERSION = 2
 
@@ -230,3 +247,16 @@ class Plan(BaseModel):
     @classmethod
     def _migrate(cls, data: Any) -> Any:
         return migrate_plan_data(data)
+
+    def active_amendments(self, kind: AmendmentKind | None = None) -> list[Amendment]:
+        return [a for a in self.amendments if a.active and (kind is None or a.kind is kind)]
+
+    def effective_profile(self, profile: Profile) -> Profile:
+        """The profile with this plan's unavailable amendments added to its calendar
+        exceptions (they come last, so they win where they overlap a profile exception)."""
+        extra = [a.as_exception() for a in self.active_amendments(AmendmentKind.UNAVAILABLE)]
+        if not extra:
+            return profile
+        exceptions = [*profile.availability.exceptions, *extra]
+        availability = profile.availability.model_copy(update={"exceptions": exceptions})
+        return profile.model_copy(update={"availability": availability})

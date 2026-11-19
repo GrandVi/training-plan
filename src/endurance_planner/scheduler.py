@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import datetime as dt
 import math
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from itertools import combinations, pairwise
 
 from endurance_planner.load import (
@@ -70,6 +71,7 @@ from endurance_planner.templates import (
     Template,
     key_blocks,
     long_blocks,
+    progress_rung,
     rung_label,
     steady_blocks,
 )
@@ -137,6 +139,77 @@ EXCEPTION_SUBSTITUTE_WHY = {
     Sport.BIKE: "Done on the bike because running is not possible that day (calendar exception).",
     Sport.RUN: "Done as a run because riding is not possible that day (calendar exception).",
 }
+
+
+@dataclass(frozen=True)
+class WeekPins:
+    """Fixed content of a week that is rebuilt around it (see replan.py).
+
+    sessions: kept as they are (sessions already done, amended sessions). They are placed
+        first and counted in the week's volume, load, run volume and number of runs, in the
+        long-session slot and in the hard-session spacing and limits.
+    skipped: sessions removed by an amendment. Their day stays free and their slot (long,
+        key, easy) is not given to another day: what is lost is not made up.
+    not_before: no new session before this date (the week has started).
+    lost_s, lost_load, lost_run_s: volume, impact-weighted load and run time removed by
+        amendments (skipped or shortened sessions); the other sessions do not make them up.
+    ahead: fixed sessions of the next week, for the spacing of hard sessions and of hard or
+        long runs across the week boundary.
+    others_max_s, others_max_load: most volume and impact-weighted load the other sessions
+        may have together (no catch-up: what they had before the amendments, see replan.py).
+    behind: sessions of the previous week as planned before its amendments. They still
+        count for the spacing of hard sessions and of hard or long runs, so that a skipped
+        or moved session does not open a day for an extra key session (no catch-up).
+    """
+
+    sessions: tuple[Session, ...] = ()
+    skipped: tuple[Session, ...] = ()
+    not_before: dt.date | None = None
+    lost_s: float = 0.0
+    lost_load: float = 0.0
+    lost_run_s: float = 0.0
+    ahead: tuple[Session, ...] = field(default_factory=tuple)
+    others_max_s: float | None = None
+    others_max_load: float | None = None
+    behind: tuple[Session, ...] = ()
+
+    @property
+    def consumed(self) -> tuple[Session, ...]:
+        """Sessions that use one of the week's training days and slots."""
+        return self.sessions + self.skipped
+
+
+@dataclass(frozen=True)
+class SchedulerState:
+    """Snapshot of the progression state (see Scheduler.snapshot)."""
+
+    uses: dict[str, int]
+    rotation: dict[tuple[str, Phase], int]
+    level_s: float | None
+    issues: list[Issue]
+    goal_pace: dict[str, float | None]
+    capped_keys: dict[Weekday, int]
+
+
+def race_pace(goal: Goal, thresholds: ResolvedThresholds) -> tuple[float | None, float | None]:
+    """(goal race pace, pace implied by the target time) as fractions of threshold speed.
+
+    The race pace is the goal type's usual pace, or the target time's pace clamped to the
+    usual range; None for goals without a race pace (bike, ultra).
+    """
+    spec = GOAL_SPECS[goal.type]
+    pace = spec.race_pace
+    wanted = None
+    distance = GOAL_DISTANCE_KM.get(goal.type)
+    threshold = thresholds.threshold_pace_s
+    if pace and distance and goal.target.time and threshold:
+        wanted = threshold / (goal.target.time / distance)
+        pace = min(max(wanted, spec.race_pace_range[0]), spec.race_pace_range[1])
+    return pace, wanted
+
+
+def _is_loading(sk: WeekSkeleton) -> bool:
+    return not sk.recovery and sk.phase not in (Phase.TAPER, Phase.TRANSITION)
 
 
 @dataclass
@@ -211,25 +284,64 @@ class Scheduler:
     def goal_pace(self, goal: Goal) -> float | None:
         """Goal race pace as a fraction of threshold speed (run goals only)."""
         if goal.name not in self._goal_pace:
-            spec = GOAL_SPECS[goal.type]
-            pace = spec.race_pace
-            distance = GOAL_DISTANCE_KM.get(goal.type)
-            threshold = self.thresholds.threshold_pace_s
-            if pace and distance and goal.target.time and threshold:
-                wanted = threshold / (goal.target.time / distance)
-                pace = min(max(wanted, spec.race_pace_range[0]), spec.race_pace_range[1])
-                if pace != wanted:
-                    self._warn(
-                        "goal_pace_clamped",
-                        f"'{goal.name}': target time implies {wanted:.0%} of threshold speed, "
-                        "outside the usual range for this distance; race-pace work uses "
-                        f"{pace:.0%}",
-                    )
+            pace, wanted = race_pace(goal, self.thresholds)
+            if wanted is not None and pace != wanted:
+                self._warn(
+                    "goal_pace_clamped",
+                    f"'{goal.name}': target time implies {wanted:.0%} of threshold speed, "
+                    "outside the usual range for this distance; race-pace work uses "
+                    f"{pace:.0%}",
+                )
             self._goal_pace[goal.name] = pace
         return self._goal_pace[goal.name]
 
+    # ------------------------------------------------------------------ state
+    def snapshot(self) -> SchedulerState:
+        """Copy of the progression state, to try a week and come back (see restore)."""
+        return SchedulerState(
+            uses=dict(self.uses),
+            rotation=dict(self.rotation),
+            level_s=self.level_s,
+            issues=list(self.issues),
+            goal_pace=dict(self._goal_pace),
+            capped_keys=dict(self.capped_keys),
+        )
+
+    def restore(self, state: SchedulerState) -> None:
+        self.uses = dict(state.uses)
+        self.rotation = dict(state.rotation)
+        self.level_s = state.level_s
+        self.issues = list(state.issues)
+        self._goal_pace = dict(state.goal_pace)
+        self.capped_keys = dict(state.capped_keys)
+
+    def seed(self, skeleton: Sequence[WeekSkeleton], weeks: Sequence[Week]) -> None:
+        """Set the progression state reached after `weeks` without rebuilding them.
+
+        The volume level and the rotations follow the skeleton only; the ladders follow the
+        key sessions of the loading weeks (Session.rung, see templates.progress_rung). The
+        state is exactly the one build_week leaves after building the same weeks.
+        """
+        for sk, week in zip(skeleton, weeks, strict=True):
+            self._next_level(sk)
+            if sk.phase is Phase.TRANSITION:
+                assert self.level_s is not None
+                self.level_s *= RESTART_VOLUME
+            if _is_loading(sk):
+                self._advance_ladders(week.sessions)
+                key = (sk.goal.name, sk.phase)
+                self.rotation[key] = self.rotation.get(key, 0) + 1
+
+    def _advance_ladders(self, sessions: Sequence[Session]) -> None:
+        for session in sessions:
+            rung = progress_rung(session)
+            if session.template_id is not None and rung is not None:
+                done = self.uses.get(session.template_id, 0)
+                self.uses[session.template_id] = max(done, rung + 1)
+
     # ------------------------------------------------------------------ targets
-    def _volume(self, sk: WeekSkeleton, history: list[Week]) -> float:
+    def _next_level(self, sk: WeekSkeleton) -> None:
+        """Volume level at the start of the week (first week, or +ramp in base and build)."""
         fitness = self.profile.current_fitness
         budget = self.profile.availability.weekly_hours_budget * 3600
         if self.level_s is None:
@@ -244,6 +356,10 @@ class Scheduler:
                 )
         elif sk.phase in (Phase.BASE, Phase.BUILD) and not sk.recovery:
             self.level_s = min(budget, self.level_s * (1 + self.ramp))
+
+    def _volume(self, sk: WeekSkeleton, history: list[Week]) -> float:
+        self._next_level(sk)
+        assert self.level_s is not None
         target = self.level_s
         # Reductions are relative to what was actually done in the last weeks.
         done = max((float(week.duration_s) for week in history[-RAMP_WINDOW:]), default=target)
@@ -393,9 +509,16 @@ class Scheduler:
 
     # ------------------------------------------------------------------ placement
     def _place(
-        self, sk: WeekSkeleton, history: list[Week], spec: GoalSpec, key_count: int
+        self,
+        sk: WeekSkeleton,
+        history: list[Week],
+        spec: GoalSpec,
+        key_count: int,
+        pins: WeekPins | None = None,
     ) -> tuple[list[_Placed], set[dt.date]]:
         availability = self.profile.availability
+        pins = pins or WeekPins()
+        taken = {session.date for session in pins.consumed}
         races = {goal.date for goal in sk.minor_races}
         if sk.race is not None:
             races.add(sk.race.date)
@@ -407,28 +530,38 @@ class Scheduler:
             if self._day_minutes(date) > 0
             and date not in races
             and not (sk.race is not None and date > sk.race.date)
+            and date not in taken
+            and (pins.not_before is None or date >= pins.not_before)
         ]
-        day_count = min(availability.days_per_week, len(available))
+        day_count = max(0, min(availability.days_per_week - len(pins.consumed), len(available)))
         placed: list[_Placed] = []
+        fixed_slots = {session.slot for session in pins.consumed}
+        fixed_long = [s.date for s in pins.sessions if s.slot is Slot.LONG]
 
         long_date = sk.start + dt.timedelta(days=WEEKDAYS.index(availability.long_session_day))
         if any(availability.exception_on(date) for date in dates):
             long_date = self._long_date(sk, long_date, available, eves)
-        if day_count and sk.race is None and long_date in available and long_date not in eves:
+        back_to_back = spec.back_to_back and sk.phase in (Phase.BUILD, Phase.PEAK)
+        second_long = back_to_back and not sk.recovery and Slot.LONG_2 not in fixed_slots
+        if Slot.LONG in fixed_slots:
+            # The long session is fixed (or skipped): a second long day only next to a fixed one.
+            if fixed_long and second_long and day_count >= 1:
+                self._place_second_long(placed, fixed_long[0], available, eves)
+        elif day_count and sk.race is None and long_date in available and long_date not in eves:
             placed.append(_Placed(Slot.LONG, long_date))
-            back_to_back = spec.back_to_back and sk.phase in (Phase.BUILD, Phase.PEAK)
-            if back_to_back and not sk.recovery and day_count >= 2:
-                for delta in (1, -1):
-                    second = long_date + dt.timedelta(days=delta)
-                    if second in available and second not in eves:
-                        placed.append(_Placed(Slot.LONG_2, second))
-                        break
-        long_dates = {p.date for p in placed}
+            if second_long and day_count >= 2:
+                self._place_second_long(placed, long_date, available, eves)
+        long_dates = {p.date for p in placed} | {
+            s.date for s in pins.sessions if s.slot in LONG_SLOTS
+        }
 
         free = [date for date in available if date not in long_dates and date not in eves]
         if sk.race is not None:
             free = [date for date in free if 2 <= (sk.race.date - date).days <= 4]
         previous_hard = [s.date for s in history[-1].sessions if s.intent.hard] if history else []
+        previous_hard += [
+            s.date for s in (*pins.sessions, *pins.ahead, *pins.behind) if s.intent.hard
+        ]
         best: tuple[dt.date, ...] = ()
         for count in range(min(key_count, day_count - len(placed)), 0, -1):
             best_score: float | None = None
@@ -436,7 +569,7 @@ class Scheduler:
                 if any((b - a).days < HARD_MIN_GAP_DAYS for a, b in pairwise(combo)):
                     continue
                 if any(
-                    (date - hard).days < HARD_MIN_GAP_DAYS
+                    abs((date - hard).days) < HARD_MIN_GAP_DAYS
                     for date in combo
                     for hard in previous_hard
                 ):
@@ -446,7 +579,8 @@ class Scheduler:
                     best, best_score = combo, score
             if best:
                 break
-        placed.extend(_Placed(KEY_SLOTS[i], date) for i, date in enumerate(best))
+        key_slots = [slot for slot in KEY_SLOTS if slot not in fixed_slots]
+        placed.extend(_Placed(key_slots[i], date) for i, date in enumerate(best))
 
         used = long_dates | set(best)
         rest = sorted(
@@ -455,6 +589,16 @@ class Scheduler:
         )
         placed.extend(_Placed(Slot.EASY, date) for date in rest[: day_count - len(placed)])
         return sorted(placed, key=lambda p: p.date), eves
+
+    @staticmethod
+    def _place_second_long(
+        placed: list[_Placed], long_date: dt.date, available: list[dt.date], eves: set[dt.date]
+    ) -> None:
+        for delta in (1, -1):
+            second = long_date + dt.timedelta(days=delta)
+            if second in available and second not in eves:
+                placed.append(_Placed(Slot.LONG_2, second))
+                break
 
     def _long_date(
         self, sk: WeekSkeleton, usual: dt.date, available: list[dt.date], eves: set[dt.date]
@@ -492,11 +636,14 @@ class Scheduler:
         caps: _Caps,
         race_week: bool,
         eves: set[dt.date],
+        pins: WeekPins | None = None,
     ) -> None:
         rules = self.profile.availability.swap_rules
-        runs = 0
+        pins = pins or WeekPins()
+        runs = sum(s.sport is Sport.RUN for s in pins.sessions)
         run_left = caps.run_s
         long_dates = {p.date for p in placed if p.slot in LONG_SLOTS}
+        long_dates |= {s.date for s in pins.sessions if s.slot in LONG_SLOTS}
         impact_dates = set()
         if history:
             impact_dates = {
@@ -504,6 +651,11 @@ class Scheduler:
                 for s in history[-1].sessions
                 if s.sport is Sport.RUN and (s.intent.hard or s.slot in LONG_SLOTS)
             }
+        impact_dates |= {
+            s.date
+            for s in (*pins.sessions, *pins.ahead, *pins.behind)
+            if s.sport is Sport.RUN and (s.intent.hard or s.slot in LONG_SLOTS)
+        }
 
         def need(p: _Placed, sport: Sport) -> int:
             """Shortest useful duration of this slot."""
@@ -607,6 +759,7 @@ class Scheduler:
         template: Template | None = None,
         technical: bool = False,
         notes: str = "",
+        rung: int | None = None,
     ) -> Session:
         indoor_day = self._bike_activity(p.date) is BikeActivity.TRAINER
         indoor = sport is Sport.BIKE and indoor_day and p.slot not in LONG_SLOTS
@@ -630,6 +783,7 @@ class Scheduler:
             indoor=indoor,
             technical=technical,
             notes=notes,
+            rung=rung,
         )
 
     def _key_session(
@@ -656,6 +810,7 @@ class Scheduler:
                     what=template.rationale,
                     template=template,
                     notes=template.notes,
+                    rung=lv,
                 )
                 if p.sport is not template.sport:
                     session, _ = convert_session(
@@ -858,7 +1013,16 @@ class Scheduler:
         hours_s: float,
         caps: _Caps,
         eves: set[dt.date],
+        fixed: Sequence[Session] = (),
+        lost_s: float = 0.0,
+        limit_s: float | None = None,
     ) -> tuple[list[Session], dict[Slot, tuple[Template, int]]]:
+        """Sessions of the placed slots under the week's limits. `fixed` sessions are not
+        changed but count in the budget, the load and the intensity distribution; `lost_s`
+        (amended away) keeps the volume reductions in the same steps as without amendments."""
+        fixed_s = sum(s.duration_s for s in fixed)
+        fixed_load = sum(weighted_load(s, self.impact) for s in fixed)
+        fixed_high = sum(intensity_split(s, self.zones)[1] for s in fixed)
         knobs = _Knobs(
             hours_s=hours_s,
             drops=dict.fromkeys(templates, 0),
@@ -876,18 +1040,26 @@ class Scheduler:
             sessions, used = self._assemble(sk, spec, placed, templates, knobs, caps, eves)
             total = sum(s.duration_s for s in sessions)
             key_s = sum(s.duration_s for s in sessions if s.slot in used)
-            if (total > knobs.hours_s + 300 or total > budget_s) and self._lower(knobs):
+            over_budget = total + fixed_s > budget_s
+            if (total > knobs.hours_s + 300 or over_budget) and self._lower(knobs):
                 continue  # key sessions alone exceed the volume target or the weekly budget
-            load = sum(weighted_load(s, self.impact) for s in sessions)
+            if limit_s is not None and total > limit_s + 1:  # hard limit (no catch-up)
+                if total > key_s:
+                    knobs.hours_s = min(knobs.hours_s, total) - max(60.0, total - limit_s)
+                    continue
+                if self._lower(knobs):
+                    continue
+            load = sum(weighted_load(s, self.impact) for s in sessions) + fixed_load
             if load > caps.load:
                 if total > key_s:
-                    knobs.hours_s = min(knobs.hours_s, total) - max(300.0, 0.05 * total)
+                    step = max(300.0, 0.05 * (total + fixed_s + lost_s))  # same steps with pins
+                    knobs.hours_s = min(knobs.hours_s, total) - step
                     continue
                 if self._lower(knobs):
                     continue
             splits = [intensity_split(s, self.zones) for s in sessions]
-            high = sum(split[1] for split in splits)
-            if total and high / total > max_high:
+            high = sum(split[1] for split in splits) + fixed_high
+            if total + fixed_s and high / (total + fixed_s) > max_high:
                 if knobs.quality_long and any(s.slot is Slot.LONG for s in sessions):
                     knobs.quality_long = False
                     continue
@@ -903,8 +1075,34 @@ class Scheduler:
                     self.capped_keys[day] = self.capped_keys.get(day, 0) + 1
         return sessions, used
 
+    @staticmethod
+    def _unpicked(picked: list[list[Template]], pins: WeekPins) -> list[list[Template]]:
+        """Key templates left once the fixed and skipped key sessions are counted: each one
+        uses up the slot of its own template (or the last slot)."""
+        left = list(picked)
+        for session in pins.consumed:
+            if session.slot not in KEY_SLOTS or not left:
+                continue
+            index = next(
+                (
+                    i
+                    for i, options in enumerate(left)
+                    if session.template_id in {t.id for t in options}
+                ),
+                len(left) - 1,
+            )
+            del left[index]
+        return left
+
     # ------------------------------------------------------------------ entry point
-    def build_week(self, sk: WeekSkeleton, history: list[Week]) -> Week:
+    def build_week(
+        self, sk: WeekSkeleton, history: list[Week], pinned: WeekPins | None = None
+    ) -> Week:
+        """Build one week from the skeleton and the weeks before it.
+
+        `pinned` (optional) gives sessions that must stay as they are; the rest of the week is
+        built around them (see WeekPins). Without it the week is built from scratch.
+        """
         spec = GOAL_SPECS[sk.goal.type]
         goal_sport = self.profile.goal_sport(sk.goal)
         if goal_sport not in self.enabled:
@@ -912,24 +1110,47 @@ class Scheduler:
         hours_s = self._volume(sk, history)
         caps = self._caps(sk, history, goal_sport, spec, hours_s)
         picked = self._key_templates(sk, spec, self.profile.goal_sport(sk.goal))
-        placed, eves = self._place(sk, history, spec, len(picked))
-        self._assign_sports(placed, history, goal_sport, caps, sk.race is not None, eves)
+        fixed: tuple[Session, ...] = ()
+        key_slots: Sequence[Slot] = KEY_SLOTS
+        if pinned is not None:
+            fixed = pinned.sessions
+            picked = self._unpicked(picked, pinned)
+            used_slots = {s.slot for s in pinned.consumed}
+            key_slots = [slot for slot in KEY_SLOTS if slot not in used_slots]
+            hours_s -= sum(s.duration_s for s in fixed) + pinned.lost_s
+            run_s = sum(s.duration_s for s in fixed if s.sport is Sport.RUN) + pinned.lost_run_s
+            load = caps.load - pinned.lost_load
+            if pinned.others_max_load is not None:
+                fixed_load = sum(weighted_load(s, self.impact) for s in fixed)
+                load = min(load, pinned.others_max_load + fixed_load)
+            if pinned.others_max_s is not None:
+                hours_s = min(hours_s, pinned.others_max_s)
+            caps = replace(caps, load=load, run_s=max(0.0, caps.run_s - run_s))
+        placed, eves = self._place(sk, history, spec, len(picked), pinned)
+        self._assign_sports(placed, history, goal_sport, caps, sk.race is not None, eves, pinned)
         placed = [p for p in placed if p.sport is not None]
         keys = [p for p in placed if p.slot in KEY_SLOTS]
         for index, p in enumerate(keys):  # renumber after possible drops
-            p.slot = KEY_SLOTS[index]
+            p.slot = key_slots[index]
         templates = {p.slot: picked[index] for index, p in enumerate(keys)}
 
-        sessions, used = self._fit(sk, spec, placed, templates, hours_s, caps, eves)
+        lost_s = pinned.lost_s if pinned is not None else 0.0
+        limit_s = pinned.others_max_s if pinned is not None else None
+        sessions, used = self._fit(
+            sk, spec, placed, templates, hours_s, caps, eves, fixed, lost_s, limit_s
+        )
         sessions = [
             resolve_session(self._forced_activity(session), self.thresholds) for session in sessions
         ]
 
-        if not sk.recovery and sk.phase not in (Phase.TAPER, Phase.TRANSITION):
+        if _is_loading(sk):
             for template, level in used.values():
                 self.uses[template.id] = max(self.uses.get(template.id, 0), level + 1)
+            self._advance_ladders(fixed)
             key = (sk.goal.name, sk.phase)
             self.rotation[key] = self.rotation.get(key, 0) + 1
+        if fixed:
+            sessions = sorted([*fixed, *sessions], key=lambda s: s.date)
         races = [goal.name for goal in sk.minor_races]
         if sk.race is not None:
             races.append(sk.race.name)

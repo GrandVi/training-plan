@@ -99,7 +99,24 @@ def generate_plan(profile: Profile, today: dt.date, start: dt.date | None = None
     for week in skeleton:
         weeks.append(scheduler.build_week(week, weeks))
 
-    issues += skeleton_issues + _feasibility_warnings(profile, weeks)
+    issues += skeleton_issues + plan_warnings(profile, start, weeks, scheduler)
+    plan = Plan(
+        id=plan_id(profile, start),
+        created=today,
+        athlete=profile.athlete.name,
+        goals=profile.goals,
+        weeks=weeks,
+        warnings=issues,
+    )
+    plan.warnings.extend(assert_valid(plan, profile, today))
+    return plan
+
+
+def plan_warnings(
+    profile: Profile, start: dt.date, weeks: list[Week], scheduler: Scheduler
+) -> list[Issue]:
+    """Warnings about the weeks built by `scheduler` (shared with replanning)."""
+    issues = _feasibility_warnings(profile, weeks)
     issues += exception_warnings(profile, start) + scheduler.issues
     if scheduler.capped_keys:
         days = ", ".join(day.value for day in scheduler.capped_keys)
@@ -122,16 +139,7 @@ def generate_plan(profile: Profile, today: dt.date, start: dt.date | None = None
                     f"no {sport} session is planned",
                 )
             )
-    plan = Plan(
-        id=plan_id(profile, start),
-        created=today,
-        athlete=profile.athlete.name,
-        goals=profile.goals,
-        weeks=weeks,
-        warnings=issues,
-    )
-    plan.warnings.extend(assert_valid(plan, profile, today))
-    return plan
+    return issues
 
 
 def retarget_plan(plan: Plan, profile: Profile, today: dt.date) -> tuple[Plan, list[Issue]]:

@@ -8,11 +8,12 @@ each time the template is used in a loading week.
 To add a workout: add a Template here and reference its id in specificity.py.
 """
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from endurance_planner.models.enums import Intent, Phase, Sport, StepKind, TargetKind
-from endurance_planner.models.plan import Repeat, Step, Target
+from endurance_planner.models.plan import Repeat, Session, Step, Target
 from endurance_planner.targets import NATIVE_KIND
 
 BASE, BUILD, PEAK, TAPER = Phase.BASE, Phase.BUILD, Phase.PEAK, Phase.TAPER
@@ -449,6 +450,31 @@ def key_blocks(
 
 def rung_label(template: Template, level: int) -> str:
     return template.ladder[min(level, len(template.ladder) - 1)].label
+
+
+_FROM_MARK = re.compile(r" \[from (bike|run)\]$")
+
+
+def progress_rung(session: Session) -> int | None:
+    """Ladder level a session completes, for progression (None: it does not count).
+
+    Schema v2 stores it in Session.rung. For sessions of v1 plans it is read back from the
+    name ("<template name> <rung label>", possibly converted to the other sport).
+    An amended session without a rung was skipped, shortened or made easier: it does not
+    count, so its ladder does not advance.
+    """
+    if session.rung is not None:
+        return session.rung
+    if session.amendment_id is not None or session.template_id is None:
+        return None
+    template = TEMPLATES.get(session.template_id)
+    if template is None:
+        return None
+    name = _FROM_MARK.sub("", session.name)
+    levels = [
+        lv for lv, rung in enumerate(template.ladder) if name == f"{template.name} {rung.label}"
+    ]
+    return levels[-1] if levels else None
 
 
 def steady_blocks(sport: Sport, duration_s: int) -> list[Step | Repeat]:

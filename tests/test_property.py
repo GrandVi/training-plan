@@ -10,7 +10,25 @@ from typing import Any
 import pytest
 
 from builders import TODAY, with_exceptions
-from endurance_planner.models.enums import GoalType, Priority, Severity, Weekday
+from endurance_planner.amend import (
+    AmendError,
+    AmendResult,
+    SessionEdit,
+    add_unavailable,
+    amend_session,
+    undo_amendment,
+)
+from endurance_planner.models.enums import (
+    BikeActivity,
+    GoalType,
+    Intent,
+    Priority,
+    Scope,
+    Severity,
+    Sport,
+    Weekday,
+)
+from endurance_planner.models.plan import Plan
 from endurance_planner.models.profile import GOAL_SPORT, Profile
 from endurance_planner.planner import generate_plan
 from endurance_planner.specificity import GOAL_SPECS
@@ -186,3 +204,58 @@ def test_random_profiles_with_exceptions_give_valid_plans(seed: int) -> None:
         assert len(week.sessions) <= availability.days_per_week
         for session in week.sessions:
             assert session.duration_s <= availability.minutes(session.date, session.sport) * 60
+
+
+def random_amendment(
+    rng: random.Random, plan: Plan, profile: Profile, today: dt.date
+) -> AmendResult:
+    """One random amendment of a session on or after `today` (raises AmendError if refused)."""
+    sessions = [s for week in plan.weeks for s in week.sessions if s.date >= today]
+    if not sessions:
+        raise AmendError("nothing left to amend")
+    session = rng.choice(sessions)
+    scope = rng.choice([Scope.REST, Scope.REST, Scope.WEEK, Scope.SESSION])
+    force = rng.random() < 0.2
+    kind = rng.choice(["minutes", "sport", "skip", "move", "intent", "activity", "range", "undo"])
+    if kind == "undo" and plan.amendments:
+        return undo_amendment(plan, profile, today, rng.choice(plan.amendments).id)
+    if kind == "range":
+        start = session.date
+        end = start + dt.timedelta(days=rng.choice([0, 2, 6]))
+        minutes = rng.choice([None, {Sport.RUN: 0}, {Sport.BIKE: 45, Sport.RUN: 30}])
+        return add_unavailable(plan, profile, today, start, end, minutes, scope=scope, force=force)
+    edit = {
+        "minutes": SessionEdit(minutes=rng.choice([20, 30, 45, 60, 90])),
+        "sport": SessionEdit(sport=rng.choice(list(Sport)), minutes=rng.choice([None, 45])),
+        "skip": SessionEdit(skip=True),
+        "move": SessionEdit(move_to=session.date + dt.timedelta(days=rng.choice([-2, -1, 1, 2]))),
+        "intent": SessionEdit(intent=rng.choice([Intent.ENDURANCE, Intent.RECOVERY])),
+        "activity": SessionEdit(activity=rng.choice(list(BikeActivity))),
+        "undo": SessionEdit(minutes=40),
+    }[kind]
+    return amend_session(plan, profile, today, session.date, edit, scope=scope, force=force)
+
+
+@pytest.mark.parametrize("seed", range(150))
+def test_random_amendments_keep_plans_valid(seed: int) -> None:
+    """1 to 5 random amendments (refused when they break a rule, unless forced): the plan
+    always passes validate_plan, except for the errors that forced amendments reported."""
+    profile = random_profile(seed)
+    plan = generate_plan(profile, TODAY)
+    rng = random.Random(20_000 + seed)
+    today = TODAY + dt.timedelta(days=rng.choice([0, 0, 3, 10, 24]))
+    reported: set[tuple[str, int | None]] = set()
+    for _ in range(rng.randint(1, 5)):
+        try:
+            result = random_amendment(rng, plan, profile, today)
+        except AmendError:
+            continue
+        forced = result.amendment is not None and result.amendment.force
+        if result.errors and not forced:
+            continue  # refused, as the CLI does without --force
+        reported |= {(issue.code, issue.week) for issue in result.errors}
+        plan = result.plan
+    errors = {
+        (i.code, i.week) for i in validate_plan(plan, profile) if i.severity is Severity.ERROR
+    }
+    assert errors <= reported

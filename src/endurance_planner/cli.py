@@ -8,6 +8,16 @@ from typing import Annotated
 
 import typer
 
+from endurance_planner.amend import (
+    AmendError,
+    AmendResult,
+    SessionEdit,
+    add_unavailable,
+    amend_session,
+    amendment_lines,
+    swap_sport,
+    undo_amendment,
+)
 from endurance_planner.config import ProfileError, load_profile
 from endurance_planner.export.intervals_icu import (
     IntervalsClient,
@@ -22,15 +32,17 @@ from endurance_planner.export.intervals_icu import (
 )
 from endurance_planner.export.json_io import load_plan, save_plan
 from endurance_planner.export.markdown import fitness_csv, render_markdown, weekly_csv
-from endurance_planner.models.enums import GoalType, Severity
+from endurance_planner.models.enums import BikeActivity, GoalType, Intent, Scope, Severity, Sport
 from endurance_planner.models.issues import Issue
 from endurance_planner.models.plan import Plan
 from endurance_planner.models.profile import Profile
 from endurance_planner.periodization import PlanningError
 from endurance_planner.planner import generate_plan, retarget_plan
 from endurance_planner.profile_tools import dump_profile, starter_profile, zone_report
+from endurance_planner.replan import ReplanResult, change_lines, replan_plan
+from endurance_planner.rules import DEFAULT_SCOPE
 from endurance_planner.schemas import plan_json_schema, profile_json_schema
-from endurance_planner.swap import SwapError, swap_session
+from endurance_planner.swap import SwapError
 from endurance_planner.thresholds import resolve_thresholds
 from endurance_planner.validation import PlanValidationError, validate_plan
 
@@ -105,6 +117,40 @@ def _json(data: object) -> str:
 
 
 OutOption = Annotated[Path | None, typer.Option("--out", "-o", help="Write to a file.")]
+InPlaceOption = Annotated[
+    Path | None, typer.Option("--out", "-o", help="Output file (default: in place).")
+]
+ScopeOption = Annotated[
+    Scope,
+    typer.Option(help="session: only this session; week: also its week; rest: later weeks too."),
+]
+DryRunOption = Annotated[bool, typer.Option("--dry-run", help="Print the changes, write nothing.")]
+ForceOption = Annotated[
+    bool, typer.Option(help="Write the plan even if it breaks a rule (the errors are listed).")
+]
+ReasonOption = Annotated[str, typer.Option(help="Why (kept in the amendment log).")]
+
+
+def _changes(
+    result: AmendResult | ReplanResult,
+    plan: Path,
+    out: Path | None,
+    *,
+    dry_run: bool,
+    force: bool,
+    refused: str = "not applied: the plan would break at least one rule (use --force)",
+) -> None:
+    """Print the changes and issues, then write the plan unless refused or a dry run."""
+    for line in change_lines(result.changes):
+        typer.echo(line)
+    _print_issues(result.issues)
+    if dry_run:
+        typer.echo("dry run: nothing written", err=True)
+        return
+    if result.errors and not force:
+        raise _fail(refused)
+    save_plan(result.plan, out or plan)
+    typer.echo(f"wrote {out or plan}", err=True)
 
 
 def make_client(athlete_id: str | None, verbose: bool) -> IntervalsClient:
@@ -272,19 +318,177 @@ def plan_swap(
     ] = None,
     today: TodayOption = None,
 ) -> None:
-    """Convert one session to the other sport, preserving intent and impact-weighted load."""
+    """Convert one session to the other sport, preserving intent and impact-weighted load.
+
+    Shortcut for `plan amend --sport <other sport> --scope session`.
+    """
     loaded, athlete = _plan(plan), _profile(profile)
-    thresholds, _ = resolve_thresholds(athlete, _date(today))
     try:
-        swapped, issues = swap_session(loaded, _date(date), athlete, thresholds)
-    except SwapError as exc:
+        result = swap_sport(loaded, athlete, _date(today), _date(date), force=force)
+    except (AmendError, SwapError) as exc:
         raise _fail(str(exc)) from exc
-    _print_issues(issues)
-    if any(issue.severity is Severity.ERROR for issue in issues) and not force:
+    _print_issues(result.issues)
+    if result.errors and not force:
         raise _fail("swap not applied: it breaks at least one rule (use --force to apply anyway)")
-    save_plan(swapped, out or plan)
-    session = next(s for week in swapped.weeks for s in week.sessions if s.date == _date(date))
+    save_plan(result.plan, out or plan)
+    session = next(s for week in result.plan.weeks for s in week.sessions if s.date == _date(date))
     typer.echo(f"{session.date}: now a {session.sport.value} session, {session.name}", err=True)
+
+
+@plan_app.command("amend")
+def plan_amend(
+    plan: PlanArgument,
+    date: Annotated[str, typer.Option(help="Date of the session to change (YYYY-MM-DD).")],
+    minutes: Annotated[int | None, typer.Option(min=1, help="New duration in minutes.")] = None,
+    sport: Annotated[Sport | None, typer.Option(help="Do it in this sport.")] = None,
+    activity: Annotated[
+        BikeActivity | None, typer.Option(help="Bike type: road, mtb or trainer.")
+    ] = None,
+    intent: Annotated[
+        Intent | None, typer.Option(help="Make it easier: endurance or recovery.")
+    ] = None,
+    skip: Annotated[bool, typer.Option(help="Skip the session (nothing else combines).")] = False,
+    move_to: Annotated[
+        str | None, typer.Option(help="Move it to this day of the same week.")
+    ] = None,
+    scope: ScopeOption = DEFAULT_SCOPE,
+    dry_run: DryRunOption = False,
+    reason: ReasonOption = "",
+    force: ForceOption = False,
+    profile: ProfileOption = Path("profile.yaml"),
+    out: InPlaceOption = None,
+    today: TodayOption = None,
+) -> None:
+    """Change one session (shorter, other sport or bike, easier, skipped, moved); the rest
+    of the plan adapts according to --scope. The session is pinned and the change logged."""
+    loaded, athlete = _plan(plan), _profile(profile)
+    edit = SessionEdit(
+        minutes=minutes,
+        sport=sport,
+        activity=activity,
+        intent=intent,
+        skip=skip,
+        move_to=_date(move_to) if move_to else None,
+    )
+    try:
+        result = amend_session(
+            loaded,
+            athlete,
+            _date(today),
+            _date(date),
+            edit,
+            scope=scope,
+            reason=reason,
+            force=force,
+        )
+    except (AmendError, SwapError, PlanningError) as exc:
+        raise _fail(str(exc)) from exc
+    if result.amendment is not None:
+        typer.echo(f"amendment {result.amendment.id}: {edit.describe()} (scope {scope})", err=True)
+    _changes(result, plan, out, dry_run=dry_run, force=force)
+
+
+def _day_minutes(value: str | None) -> dict[Sport, int] | None:
+    """'run=0,bike=60' -> {run: 0, bike: 60}."""
+    if value is None:
+        return None
+    minutes: dict[Sport, int] = {}
+    for part in value.split(","):
+        name, _, number = part.partition("=")
+        try:
+            minutes[Sport(name.strip())] = int(number)
+        except ValueError as exc:
+            raise _fail(
+                f"--minutes: expected sport=minutes pairs like run=0,bike=60, got {value!r}"
+            ) from exc
+    return minutes
+
+
+@plan_app.command("unavailable")
+def plan_unavailable(
+    plan: PlanArgument,
+    date_from: Annotated[str, typer.Option("--from", help="First day (YYYY-MM-DD).")],
+    date_to: Annotated[str | None, typer.Option("--to", help="Last day (default: --from).")] = None,
+    minutes: Annotated[
+        str | None,
+        typer.Option(help="Minutes per sport, e.g. run=0,bike=60 (default: no training)."),
+    ] = None,
+    activity: Annotated[
+        BikeActivity | None, typer.Option(help="Force the bike type: road, mtb or trainer.")
+    ] = None,
+    scope: ScopeOption = DEFAULT_SCOPE,
+    dry_run: DryRunOption = False,
+    reason: ReasonOption = "",
+    force: ForceOption = False,
+    profile: ProfileOption = Path("profile.yaml"),
+    out: InPlaceOption = None,
+    today: TodayOption = None,
+) -> None:
+    """Make days unavailable or limited (same rules as availability.exceptions) and adapt."""
+    loaded, athlete = _plan(plan), _profile(profile)
+    try:
+        result = add_unavailable(
+            loaded,
+            athlete,
+            _date(today),
+            _date(date_from),
+            _date(date_to) if date_to else None,
+            _day_minutes(minutes),
+            activity,
+            scope=scope,
+            reason=reason,
+            force=force,
+        )
+    except (AmendError, PlanningError) as exc:
+        raise _fail(str(exc)) from exc
+    if result.amendment is not None:
+        label = result.amendment.as_exception().label()
+        typer.echo(f"amendment {result.amendment.id}: unavailable {label}", err=True)
+    _changes(result, plan, out, dry_run=dry_run, force=force)
+
+
+@plan_app.command("replan")
+def plan_replan(
+    plan: PlanArgument,
+    dry_run: DryRunOption = False,
+    force: ForceOption = False,
+    profile: ProfileOption = Path("profile.yaml"),
+    out: InPlaceOption = None,
+    today: TodayOption = None,
+) -> None:
+    """Rebuild the plan from today after editing profile.yaml; past and pinned sessions stay."""
+    loaded, athlete = _plan(plan), _profile(profile)
+    try:
+        result = replan_plan(loaded, athlete, _date(today))
+    except PlanningError as exc:
+        raise _fail(str(exc)) from exc
+    _changes(result, plan, out, dry_run=dry_run, force=force)
+
+
+@plan_app.command("amendments")
+def plan_amendments(
+    plan: PlanArgument,
+    undo: Annotated[
+        str | None, typer.Option(help="Remove this amendment (e.g. a2) and replan.")
+    ] = None,
+    dry_run: DryRunOption = False,
+    force: ForceOption = False,
+    profile: ProfileOption = Path("profile.yaml"),
+    out: InPlaceOption = None,
+    today: TodayOption = None,
+) -> None:
+    """List the plan's amendments, or undo one."""
+    loaded = _plan(plan)
+    if undo is None:
+        for line in amendment_lines(loaded):
+            typer.echo(line)
+        return
+    try:
+        result = undo_amendment(loaded, _profile(profile), _date(today), undo)
+    except (AmendError, PlanningError) as exc:
+        raise _fail(str(exc)) from exc
+    typer.echo(f"amendment {undo} undone", err=True)
+    _changes(result, plan, out, dry_run=dry_run, force=force)
 
 
 @profile_app.command("sync-intervals")
@@ -336,6 +540,13 @@ def push(
     prune: Annotated[
         bool, typer.Option(help="Delete this plan's events that are no longer in the plan.")
     ] = True,
+    only_changed: Annotated[
+        bool,
+        typer.Option(
+            "--only-changed/--all",
+            help="Write only the events that differ from the calendar (default), or all.",
+        ),
+    ] = True,
     athlete_id: AthleteOption = None,
     verbose: VerboseOption = False,
     today: TodayOption = None,
@@ -361,11 +572,20 @@ def push(
             for diff in diffs:
                 typer.secho(f"  {diff.label}", fg=typer.colors.YELLOW, err=True)
         result = push_plan(
-            client, loaded, start=start, end=end, absolute=absolute_targets, prune=prune
+            client,
+            loaded,
+            start=start,
+            end=end,
+            absolute=absolute_targets,
+            prune=prune,
+            only_changed=only_changed,
         )
     except IntervalsError as exc:
         raise _fail(str(exc)) from exc
-    typer.echo(f"pushed {result.upserted} workout(s), removed {result.pruned} stale event(s)")
+    unchanged = f", {result.unchanged} unchanged" if result.unchanged else ""
+    typer.echo(
+        f"pushed {result.upserted} workout(s), removed {result.pruned} stale event(s){unchanged}"
+    )
 
 
 @app.command()
