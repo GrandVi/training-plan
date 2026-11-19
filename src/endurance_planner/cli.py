@@ -29,6 +29,7 @@ from endurance_planner.models.profile import Profile
 from endurance_planner.periodization import PlanningError
 from endurance_planner.planner import generate_plan, retarget_plan
 from endurance_planner.profile_tools import dump_profile, starter_profile, zone_report
+from endurance_planner.schemas import plan_json_schema, profile_json_schema
 from endurance_planner.swap import SwapError, swap_session
 from endurance_planner.thresholds import resolve_thresholds
 from endurance_planner.validation import PlanValidationError, validate_plan
@@ -99,6 +100,13 @@ def _write(text: str, out: Path | None) -> None:
         typer.echo(f"wrote {out}", err=True)
 
 
+def _json(data: object) -> str:
+    return json.dumps(data, indent=2) + "\n"
+
+
+OutOption = Annotated[Path | None, typer.Option("--out", "-o", help="Write to a file.")]
+
+
 def make_client(athlete_id: str | None, verbose: bool) -> IntervalsClient:
     """intervals.icu client from the environment or a .env file (the key is never stored)."""
     env = {**load_env_file(), **os.environ}
@@ -116,6 +124,12 @@ def profile_validate(
 ) -> None:
     """Check the profile and print the resolved zone tables."""
     typer.echo(zone_report(_profile(profile), _date(today)), nl=False)
+
+
+@profile_app.command("schema")
+def profile_schema(out: OutOption = None) -> None:
+    """Print the JSON Schema of profile.yaml (for editor validation and completion)."""
+    _write(_json(profile_json_schema()), out)
 
 
 @profile_app.command("init")
@@ -186,6 +200,12 @@ def plan_generate(
     typer.echo(f"wrote {out}: {len(plan.weeks)} weeks from {plan.weeks[0].start}", err=True)
     if markdown is not None:
         _write(render_markdown(plan, athlete), markdown)
+
+
+@plan_app.command("schema")
+def plan_schema(out: OutOption = None) -> None:
+    """Print the JSON Schema of plan.json."""
+    _write(_json(plan_json_schema()), out)
 
 
 @plan_app.command("show")

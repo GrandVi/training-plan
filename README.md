@@ -39,11 +39,13 @@ All commands read `profile.yaml` in the current directory unless `-p` is given.
 | `profile init` | Interactive wizard, asks only for the required fields |
 | `profile validate` | Validates the file, prints warnings and resolved zones (W, min/km, bpm) |
 | `profile sync-intervals` | Compares thresholds with intervals.icu, offers to update the file |
+| `profile schema` | Prints the JSON Schema of `profile.yaml` (`-o` to write it) |
 | `plan generate` | Builds, validates and writes the plan (JSON, optional Markdown) |
 | `plan show` | Markdown summary, weekly CSV, or daily CTL/ATL/TSB CSV |
 | `plan validate` | Re-checks every rule, exit code 1 on errors |
 | `plan swap` | Converts one session to the other sport and re-validates its week |
 | `plan retarget` | Recomputes watts / paces / bpm, structure and dates untouched |
+| `plan schema` | Prints the JSON Schema of `plan.json` |
 | `push` | Upserts workouts to intervals.icu (`--dry-run`, `--from/--to`, `--absolute-targets`) |
 | `clear` | Deletes this tool's events from intervals.icu (`--dry-run`, `--all-plans`) |
 
@@ -66,6 +68,15 @@ All commands read `profile.yaml` in the current directory unless `-p` is given.
 The complete, commented file is `examples/profile.example.yaml`. Unknown keys are rejected.
 Thresholds can be estimated (`ftp_20min_w`, `recent_race`); estimates, stale tests (more than
 8 weeks old) and inconsistent values are reported as warnings.
+
+**Editor support.** The first line of a profile names its JSON Schema:
+
+    # yaml-language-server: $schema=../schemas/profile.schema.json
+
+Editors using the YAML language server (VS Code YAML extension, Neovim, JetBrains) then
+validate the file and complete its keys while you type. `profile init` writes this line with
+the schema's URL on GitHub; to work offline or to match an older installed version, run
+`endurance-planner profile schema -o profile.schema.json` and point the line at that file.
 
 ## How a plan is built
 
@@ -231,6 +242,14 @@ Planning:
 
 Tooling:
 - `mypy` checks against the running interpreter (no pinned `python_version`); `ruff` targets 3.11.
+- CI (GitHub Actions) runs `pytest`, `ruff check`, `ruff format --check` and `mypy` on
+  Python 3.11 and 3.12.
+- Plan files carry `schema_version` (now 2). Version 1 files are upgraded in memory when they
+  are read (new fields take their defaults) and written back as version 2; newer versions are
+  refused with a message asking to update the tool.
+- The JSON Schemas are committed in `schemas/` (a test keeps them in sync with the models).
+  The profile schema is the input form (paces as `"m:ss"`, `rest` days); the plan schema is the
+  form the tool writes. Generated profiles point at the schema's URL on the `main` branch.
 - The property-style tests use a seeded `random.Random` (150 profiles) rather than Hypothesis,
   to keep dependencies minimal.
 
@@ -244,6 +263,9 @@ Tooling:
   `Issue`), and make the scheduler respect it; add a tampering case in `tests/test_validation.py`.
 - **Tuning**: athlete-level caps are in `preferences.limits`; scheduling constants are at the
   top of `scheduler.py`; zone tables and HR / RPE mappings are in `zones.py`.
+- **Plan file format**: add new plan fields as optional with a default that describes older
+  files, bump `PLAN_SCHEMA_VERSION` in `models/plan.py`, extend `migrate_plan_data`, add a
+  stored old file under `tests/fixtures/` and regenerate `schemas/` (`plan schema -o ...`).
 - **Front-end**: call `planner.generate_plan`, `swap.swap_session`, `planner.retarget_plan`,
   `validation.validate_plan` and the `export` functions directly; the plan is a pydantic model
   (`Plan > Week > Session > Step | Repeat`) with a stable JSON form.
@@ -255,7 +277,9 @@ Tooling:
     pip install -e ".[dev]"
     pytest && ruff check . && ruff format --check . && mypy
 
-Tests never touch the network. Layout:
+Tests never touch the network. `tests/test_regression.py` compares plans with fixtures made
+before schema v2 (the example plan and a digest of each property-test plan), so a change of
+behaviour shows up as a failing test. Layout:
 
     src/endurance_planner/
       models/          profile, plan, enums, issues (pydantic)
@@ -266,6 +290,7 @@ Tests never touch the network. Layout:
       periodization.py templates.py specificity.py scheduler.py planner.py
       swap.py          validation.py            adapt.py (future hook)
       export/          json_io, markdown (+ CSV), intervals_icu
+      schemas.py       JSON Schemas (committed copies in schemas/)
       cli.py           Typer commands
 
 ## Disclaimer

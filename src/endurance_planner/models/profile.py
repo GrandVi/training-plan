@@ -15,6 +15,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PlainSerializer,
+    WithJsonSchema,
     field_validator,
     model_validator,
 )
@@ -28,6 +29,15 @@ Clock = Annotated[
     BeforeValidator(parse_clock),
     PlainSerializer(format_clock, return_type=str),
     Field(gt=0),
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"type": "string", "pattern": r"^\d+:\d{2}(:\d{2})?$"},
+                {"type": "integer", "exclusiveMinimum": 0},
+            ],
+            "description": "'m:ss' or 'h:mm:ss' (quoted), or seconds",
+        }
+    ),
 ]
 Bpm = Annotated[int, Field(gt=60, lt=240)]
 
@@ -175,11 +185,17 @@ class SwapRules(_Strict):
     no_hard_run_after_hard_bike: bool = True
 
 
+def _rest_day_schema(schema: dict[str, Any]) -> None:
+    """JSON Schema of `weekdays`: a day is minutes per sport, "rest" or empty."""
+    minutes = schema.pop("additionalProperties")
+    schema["additionalProperties"] = {"anyOf": [minutes, {"const": "rest"}, {"type": "null"}]}
+
+
 class Availability(_Strict):
     days_per_week: int = Field(ge=1, le=7)
     weekly_hours_budget: float = Field(gt=0)
     # Max minutes per sport for each day; "rest" (or a missing day) means no training.
-    weekdays: dict[Weekday, SportMinutes]
+    weekdays: dict[Weekday, SportMinutes] = Field(json_schema_extra=_rest_day_schema)
     long_session_day: Weekday = Weekday.SAT
     indoor_trainer_days: list[Weekday] = Field(default_factory=list)
     swap_rules: SwapRules = Field(default_factory=SwapRules)

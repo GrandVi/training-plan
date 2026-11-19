@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../schemas/profile.schema.json
 # endurance-planner athlete profile.
 # [required] = must be set; everything else shows its default or is optional.
 # Unknown keys are rejected. Paces and times are quoted "m:ss" or "h:mm:ss".

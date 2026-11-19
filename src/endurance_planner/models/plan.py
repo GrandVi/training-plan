@@ -8,15 +8,18 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Iterable, Iterator
-from typing import Self
+from typing import Any, Self
 
 from pydantic import BaseModel, Field, computed_field, model_validator
 
 from endurance_planner.load import steps_tss
 from endurance_planner.models.enums import (
     ActivityType,
+    AmendmentKind,
+    BikeActivity,
     Intent,
     Phase,
+    Scope,
     Slot,
     Sport,
     StepKind,
@@ -118,6 +121,11 @@ class Session(BaseModel):
     indoor: bool = False
     technical: bool = False  # skills session: cannot be swapped to the other sport
     notes: str = ""
+    # Schema v2. Ladder level this key session completes (None: not a key session, or an
+    # amended key session that does not count, so its ladder does not advance).
+    rung: int | None = Field(None, ge=0)
+    pinned: bool = False  # set by an amendment: a replan keeps the session as it is
+    amendment_id: str | None = None  # amendment that produced this session
 
     def flat_steps(self) -> Iterator[Step]:
         return flatten(self.steps)
@@ -153,11 +161,72 @@ class Week(BaseModel):
         return round(sum(session.tss for session in self.sessions), 1)
 
 
+class Amendment(BaseModel):
+    """A change requested on a running plan, kept in Plan.amendments (see amend.py).
+
+    Session amendments edit, skip or move the session planned on `date`; their result
+    is pinned in the plan. Unavailable amendments add a calendar exception from `date`
+    to `to` (inclusive). A later amendment of the same session supersedes the earlier one;
+    both stay in the log.
+    """
+
+    id: str
+    kind: AmendmentKind = AmendmentKind.SESSION
+    created: dt.date  # day the amendment was made
+    date: dt.date  # planned date of the session; first day of an unavailable range
+    to: dt.date | None = None  # unavailable: last day (inclusive)
+    skip: bool = False
+    move_to: dt.date | None = None
+    minutes: int | None = Field(None, gt=0)  # new duration of the session
+    sport: Sport | None = None
+    activity: BikeActivity | None = None
+    intent: Intent | None = None  # easier intent (endurance or recovery)
+    day_minutes: dict[Sport, int] = Field(default_factory=dict)  # unavailable; {} = off
+    scope: Scope = Scope.REST
+    reason: str = ""
+    force: bool = False  # applied although it breaks a rule
+    original: Session | None = None  # session as planned before any amendment
+    replaces: str | None = None  # amendment of the same session it superseded
+    superseded_by: str | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.superseded_by is None
+
+
+PLAN_SCHEMA_VERSION = 2
+
+
+def migrate_plan_data(data: Any) -> Any:
+    """Upgrade a stored plan (parsed JSON) to the current schema, in memory.
+
+    v1 -> v2: Session.rung / pinned / amendment_id and Plan.amendments are new optional
+    fields; their defaults describe a v1 plan exactly.
+    """
+    if not isinstance(data, dict):
+        return data
+    version = data.get("schema_version", 1)
+    if not isinstance(version, int) or not 1 <= version <= PLAN_SCHEMA_VERSION:
+        raise ValueError(
+            f"plan schema_version {version!r} is not supported (this version reads 1 to "
+            f"{PLAN_SCHEMA_VERSION}); update endurance-planner"
+        )
+    if version < PLAN_SCHEMA_VERSION:
+        data = {**data, "schema_version": PLAN_SCHEMA_VERSION}
+    return data
+
+
 class Plan(BaseModel):
     id: str
-    schema_version: int = 1
+    schema_version: int = PLAN_SCHEMA_VERSION
     created: dt.date
     athlete: str
     goals: list[Goal]
     weeks: list[Week]
     warnings: list[Issue] = Field(default_factory=list)
+    amendments: list[Amendment] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate(cls, data: Any) -> Any:
+        return migrate_plan_data(data)

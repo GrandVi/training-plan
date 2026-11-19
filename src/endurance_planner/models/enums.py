@@ -104,6 +104,27 @@ class ActivityType(StrEnum):
     RUN = "Run"
 
 
+class BikeActivity(StrEnum):
+    """Kind of bike session a day allows (calendar exceptions, amendments)."""
+
+    ROAD = "road"
+    MTB = "mtb"
+    TRAINER = "trainer"
+
+
+class Scope(StrEnum):
+    """How much of a running plan an amendment rebuilds (see amend.py)."""
+
+    SESSION = "session"  # only the amended session; its week is re-validated
+    WEEK = "week"  # also the other (unpinned) sessions of that week
+    REST = "rest"  # also every later week
+
+
+class AmendmentKind(StrEnum):
+    SESSION = "session"  # one session edited, skipped or moved
+    UNAVAILABLE = "unavailable"  # a date range with less (or no) time
+
+
 class Severity(StrEnum):
     ERROR = "error"
     WARNING = "warning"

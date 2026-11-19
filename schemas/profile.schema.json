@@ -1,0 +1,852 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/GrandVi/training-plan/main/schemas/profile.schema.json",
+  "$defs": {
+    "Athlete": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "birth_year": {
+          "anyOf": [
+            {
+              "maximum": 2020,
+              "minimum": 1920,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Birth Year"
+        },
+        "weight_kg": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 200,
+              "exclusiveMinimum": 30,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Weight Kg"
+        },
+        "experience": {
+          "$ref": "#/$defs/Experience",
+          "default": "intermediate"
+        },
+        "injury_notes": {
+          "default": "",
+          "title": "Injury Notes",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "Athlete",
+      "type": "object"
+    },
+    "Availability": {
+      "additionalProperties": false,
+      "properties": {
+        "days_per_week": {
+          "maximum": 7,
+          "minimum": 1,
+          "title": "Days Per Week",
+          "type": "integer"
+        },
+        "weekly_hours_budget": {
+          "exclusiveMinimum": 0,
+          "title": "Weekly Hours Budget",
+          "type": "number"
+        },
+        "weekdays": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SportMinutes"
+              },
+              {
+                "const": "rest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "propertyNames": {
+            "$ref": "#/$defs/Weekday"
+          },
+          "title": "Weekdays",
+          "type": "object"
+        },
+        "long_session_day": {
+          "$ref": "#/$defs/Weekday",
+          "default": "sat"
+        },
+        "indoor_trainer_days": {
+          "items": {
+            "$ref": "#/$defs/Weekday"
+          },
+          "title": "Indoor Trainer Days",
+          "type": "array"
+        },
+        "swap_rules": {
+          "$ref": "#/$defs/SwapRules"
+        }
+      },
+      "required": [
+        "days_per_week",
+        "weekly_hours_budget",
+        "weekdays"
+      ],
+      "title": "Availability",
+      "type": "object"
+    },
+    "BikeThresholds": {
+      "additionalProperties": false,
+      "properties": {
+        "ftp_w": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 600,
+              "exclusiveMinimum": 50,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ftp W"
+        },
+        "ftp_20min_w": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 650,
+              "exclusiveMinimum": 50,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ftp 20Min W"
+        },
+        "lthr_bpm": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 240,
+              "exclusiveMinimum": 60,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lthr Bpm"
+        },
+        "max_hr_bpm": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 240,
+              "exclusiveMinimum": 60,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Hr Bpm"
+        },
+        "ftp_test_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ftp Test Date"
+        }
+      },
+      "title": "BikeThresholds",
+      "type": "object"
+    },
+    "CurrentFitness": {
+      "additionalProperties": false,
+      "properties": {
+        "weekly_hours": {
+          "$ref": "#/$defs/SportHours"
+        },
+        "longest_recent_session_min": {
+          "$ref": "#/$defs/SportMinutes"
+        },
+        "weeks_of_consistent_training": {
+          "default": 4,
+          "minimum": 0,
+          "title": "Weeks Of Consistent Training",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "weekly_hours"
+      ],
+      "title": "CurrentFitness",
+      "type": "object"
+    },
+    "Experience": {
+      "enum": [
+        "beginner",
+        "intermediate",
+        "advanced"
+      ],
+      "title": "Experience",
+      "type": "string"
+    },
+    "Goal": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "date": {
+          "format": "date",
+          "title": "Date",
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/GoalType"
+        },
+        "priority": {
+          "$ref": "#/$defs/Priority",
+          "default": "A"
+        },
+        "sport": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "target": {
+          "$ref": "#/$defs/GoalTarget"
+        }
+      },
+      "required": [
+        "name",
+        "date",
+        "type"
+      ],
+      "title": "Goal",
+      "type": "object"
+    },
+    "GoalTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "time": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "pattern": "^\\d+:\\d{2}(:\\d{2})?$",
+                  "type": "string"
+                },
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "integer"
+                }
+              ],
+              "description": "'m:ss' or 'h:mm:ss' (quoted), or seconds"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time"
+        },
+        "duration_h": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration H"
+        },
+        "distance_km": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Distance Km"
+        },
+        "elevation_m": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Elevation M"
+        }
+      },
+      "title": "GoalTarget",
+      "type": "object"
+    },
+    "GoalType": {
+      "enum": [
+        "run_5k",
+        "run_10k",
+        "run_half_marathon",
+        "mtb_xc",
+        "mtb_marathon",
+        "ultra_endurance"
+      ],
+      "title": "GoalType",
+      "type": "string"
+    },
+    "IntensityRatio": {
+      "additionalProperties": false,
+      "properties": {
+        "low": {
+          "default": 0.8,
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "Low",
+          "type": "number"
+        },
+        "high": {
+          "default": 0.2,
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "High",
+          "type": "number"
+        }
+      },
+      "title": "IntensityRatio",
+      "type": "object"
+    },
+    "Limits": {
+      "additionalProperties": false,
+      "description": "Safety caps, all relative (0.08 = 8%).",
+      "properties": {
+        "max_weekly_ramp": {
+          "default": 0.08,
+          "exclusiveMinimum": 0,
+          "maximum": 0.15,
+          "title": "Max Weekly Ramp",
+          "type": "number"
+        },
+        "max_run_volume_increase": {
+          "default": 0.1,
+          "exclusiveMinimum": 0,
+          "maximum": 0.2,
+          "title": "Max Run Volume Increase",
+          "type": "number"
+        },
+        "max_long_session_increase": {
+          "default": 0.1,
+          "exclusiveMinimum": 0,
+          "maximum": 0.25,
+          "title": "Max Long Session Increase",
+          "type": "number"
+        },
+        "recovery_week_factor": {
+          "default": 0.65,
+          "maximum": 0.8,
+          "minimum": 0.5,
+          "title": "Recovery Week Factor",
+          "type": "number"
+        },
+        "run_impact_multiplier": {
+          "default": 1.25,
+          "maximum": 2.0,
+          "minimum": 1.0,
+          "title": "Run Impact Multiplier",
+          "type": "number"
+        },
+        "injury_run_impact_bonus": {
+          "default": 0.15,
+          "maximum": 1.0,
+          "minimum": 0,
+          "title": "Injury Run Impact Bonus",
+          "type": "number"
+        }
+      },
+      "title": "Limits",
+      "type": "object"
+    },
+    "Preferences": {
+      "additionalProperties": false,
+      "properties": {
+        "primary_sport": {
+          "$ref": "#/$defs/Sport",
+          "default": "bike"
+        },
+        "intensity_ratio": {
+          "$ref": "#/$defs/IntensityRatio"
+        },
+        "mesocycle_pattern": {
+          "default": "3:1",
+          "enum": [
+            "3:1",
+            "2:1"
+          ],
+          "title": "Mesocycle Pattern",
+          "type": "string"
+        },
+        "max_hard_sessions_per_week": {
+          "default": 2,
+          "maximum": 3,
+          "minimum": 1,
+          "title": "Max Hard Sessions Per Week",
+          "type": "integer"
+        },
+        "limits": {
+          "$ref": "#/$defs/Limits"
+        }
+      },
+      "title": "Preferences",
+      "type": "object"
+    },
+    "Priority": {
+      "enum": [
+        "A",
+        "B",
+        "C"
+      ],
+      "title": "Priority",
+      "type": "string"
+    },
+    "RecentRace": {
+      "additionalProperties": false,
+      "properties": {
+        "distance_km": {
+          "exclusiveMinimum": 0,
+          "title": "Distance Km",
+          "type": "number"
+        },
+        "time": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+:\\d{2}(:\\d{2})?$",
+              "type": "string"
+            },
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            }
+          ],
+          "description": "'m:ss' or 'h:mm:ss' (quoted), or seconds",
+          "title": "Time"
+        }
+      },
+      "required": [
+        "distance_km",
+        "time"
+      ],
+      "title": "RecentRace",
+      "type": "object"
+    },
+    "RunThresholds": {
+      "additionalProperties": false,
+      "properties": {
+        "threshold_pace": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "pattern": "^\\d+:\\d{2}(:\\d{2})?$",
+                  "type": "string"
+                },
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "integer"
+                }
+              ],
+              "description": "'m:ss' or 'h:mm:ss' (quoted), or seconds"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Threshold Pace"
+        },
+        "lthr_bpm": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 240,
+              "exclusiveMinimum": 60,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lthr Bpm"
+        },
+        "max_hr_bpm": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 240,
+              "exclusiveMinimum": 60,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Hr Bpm"
+        },
+        "recent_race": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecentRace"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "threshold_test_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Threshold Test Date"
+        }
+      },
+      "title": "RunThresholds",
+      "type": "object"
+    },
+    "Sport": {
+      "enum": [
+        "bike",
+        "run"
+      ],
+      "title": "Sport",
+      "type": "string"
+    },
+    "SportHours": {
+      "additionalProperties": false,
+      "properties": {
+        "bike": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Bike",
+          "type": "number"
+        },
+        "run": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Run",
+          "type": "number"
+        }
+      },
+      "title": "SportHours",
+      "type": "object"
+    },
+    "SportMinutes": {
+      "additionalProperties": false,
+      "properties": {
+        "bike": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Bike",
+          "type": "integer"
+        },
+        "run": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Run",
+          "type": "integer"
+        }
+      },
+      "title": "SportMinutes",
+      "type": "object"
+    },
+    "SwapRules": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_run_instead_of_bike": {
+          "default": true,
+          "title": "Allow Run Instead Of Bike",
+          "type": "boolean"
+        },
+        "allow_bike_instead_of_run": {
+          "default": true,
+          "title": "Allow Bike Instead Of Run",
+          "type": "boolean"
+        },
+        "max_runs_per_week": {
+          "default": 3,
+          "maximum": 7,
+          "minimum": 0,
+          "title": "Max Runs Per Week",
+          "type": "integer"
+        },
+        "no_hard_run_after_hard_bike": {
+          "default": true,
+          "title": "No Hard Run After Hard Bike",
+          "type": "boolean"
+        }
+      },
+      "title": "SwapRules",
+      "type": "object"
+    },
+    "TargetMode": {
+      "additionalProperties": false,
+      "properties": {
+        "bike": {
+          "default": "power",
+          "enum": [
+            "power",
+            "hr",
+            "rpe"
+          ],
+          "title": "Bike",
+          "type": "string"
+        },
+        "run": {
+          "default": "pace",
+          "enum": [
+            "pace",
+            "hr",
+            "rpe"
+          ],
+          "title": "Run",
+          "type": "string"
+        }
+      },
+      "title": "TargetMode",
+      "type": "object"
+    },
+    "Thresholds": {
+      "additionalProperties": false,
+      "properties": {
+        "bike": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BikeThresholds"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "run": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunThresholds"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "zone_models": {
+          "$ref": "#/$defs/ZoneModels"
+        },
+        "target_mode": {
+          "$ref": "#/$defs/TargetMode"
+        }
+      },
+      "title": "Thresholds",
+      "type": "object"
+    },
+    "Weekday": {
+      "enum": [
+        "mon",
+        "tue",
+        "wed",
+        "thu",
+        "fri",
+        "sat",
+        "sun"
+      ],
+      "title": "Weekday",
+      "type": "string"
+    },
+    "ZoneDef": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "upper": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Upper"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ZoneDef",
+      "type": "object"
+    },
+    "ZoneModel": {
+      "additionalProperties": false,
+      "description": "Contiguous zones defined by their inclusive upper bounds.",
+      "properties": {
+        "zones": {
+          "items": {
+            "$ref": "#/$defs/ZoneDef"
+          },
+          "minItems": 2,
+          "title": "Zones",
+          "type": "array"
+        },
+        "low_zones": {
+          "minimum": 1,
+          "title": "Low Zones",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "zones",
+        "low_zones"
+      ],
+      "title": "ZoneModel",
+      "type": "object"
+    },
+    "ZoneModels": {
+      "additionalProperties": false,
+      "properties": {
+        "bike_power": {
+          "default": "coggan_7",
+          "enum": [
+            "coggan_7",
+            "custom"
+          ],
+          "title": "Bike Power",
+          "type": "string"
+        },
+        "run_pace": {
+          "default": "daniels_5",
+          "enum": [
+            "daniels_5",
+            "custom"
+          ],
+          "title": "Run Pace",
+          "type": "string"
+        },
+        "hr": {
+          "default": "lthr_5",
+          "enum": [
+            "lthr_5",
+            "custom"
+          ],
+          "title": "Hr",
+          "type": "string"
+        },
+        "custom": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ZoneModel"
+          },
+          "propertyNames": {
+            "enum": [
+              "bike_power",
+              "run_pace",
+              "hr"
+            ]
+          },
+          "title": "Custom",
+          "type": "object"
+        }
+      },
+      "title": "ZoneModels",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "athlete": {
+      "$ref": "#/$defs/Athlete"
+    },
+    "thresholds": {
+      "$ref": "#/$defs/Thresholds"
+    },
+    "current_fitness": {
+      "$ref": "#/$defs/CurrentFitness"
+    },
+    "availability": {
+      "$ref": "#/$defs/Availability"
+    },
+    "goals": {
+      "items": {
+        "$ref": "#/$defs/Goal"
+      },
+      "minItems": 1,
+      "title": "Goals",
+      "type": "array"
+    },
+    "preferences": {
+      "$ref": "#/$defs/Preferences"
+    }
+  },
+  "required": [
+    "athlete",
+    "thresholds",
+    "current_fitness",
+    "availability",
+    "goals"
+  ],
+  "title": "Profile",
+  "type": "object"
+}
