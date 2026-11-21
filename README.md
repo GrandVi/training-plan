@@ -237,6 +237,36 @@ Sample dry run:
                   "line": "2026-12-08 amended ..."}, ...],
      "issues": [{"severity": "warning", "code": "amend_shortened", ...}]}
 
+## Web app
+
+`serve` also serves a phone-first web app at `/` (installable as an app on Android: menu,
+"Add to Home screen" or "Install app"). Plain HTML, CSS and ES modules in
+`src/endurance_planner/web/`: no framework, no build step, no external resource.
+
+- **Week**: phase, dates, volume, TSS, load, share of easy time, calendar exceptions and
+  races; one card per session (day, sport, name, duration, TSS, intent; key, changed,
+  indoor and MTB badges); previous / this / next week.
+- **Session**: steps with relative targets and absolute values (W, min/km, bpm), the
+  rationale, "Change this session".
+- **Change this session**: new duration, sport, bike type (road, MTB, trainer), easier
+  intent, move to a day of the week, skip, reason, scope (session, week, rest). The preview
+  (dry run: changes with their reason, warnings, broken rules) always comes first; then
+  Confirm (or "Apply anyway" after ticking a box, when a rule is broken). Follow-on changes
+  of later weeks are folded under one line.
+- **Unavailable**: a date range with no training or limited minutes per sport, preview first.
+- **Push**: preview of the workouts to send (nothing is sent), then "Send to intervals.icu".
+- **Changes**: the amendment log, with Undo (preview first) on active amendments.
+- **Settings**: thresholds and profile warnings, replan or new plan (preview first),
+  "Forget the token".
+
+The token is asked once and kept in the browser's `localStorage` (in memory only when
+storage is blocked). Every change sends the plan's revision; if another device changed the
+plan meanwhile, the app says "The plan changed elsewhere" and offers to reload. A service
+worker keeps the app and the last plan viewed on the device: without a connection the
+weeks and sessions already opened stay readable (with an "Offline" banner) and changes are
+refused with a message. Service workers need HTTPS (or `localhost`), which `tailscale serve`
+provides.
+
 ## How a plan is built
 
 1. **Thresholds** (`thresholds.py`): resolve FTP, threshold pace, LTHR; estimate what is missing.
@@ -479,6 +509,18 @@ Services and storage:
   `tailscale serve` (see "Using it from several devices") rather than binding a public
   address. `/health` is open so that probes need no secret. Dry runs of `/plan/push` are the
   default, so a forgotten flag never writes to intervals.icu.
+- The web app's static files are served without a token (they hold no data; the token is
+  typed into the app). Everything else under `/plan` and `/profile` needs it.
+- Web app: dates are calendar days handled in UTC (no time zone shift); "today" is the
+  phone's local date; the week shown first is the current week (week 1 before the start,
+  the last week after the end). Later-week changes (`rebalanced`, `replanned`,
+  `regenerated`) are folded in previews, as are the workouts of a push preview.
+- The service worker is network-first for every GET of the same origin (the app shell is
+  pre-cached at install) and never touches POST requests; offline copies are marked with
+  `X-Served-From: cache`. The cache name carries a version (`v1`) to bump when the shell
+  changes.
+- Colours meet WCAG AA (4.5:1 for text, 3:1 for the focus ring) in light and dark themes;
+  `tests/test_web.py` computes the ratios from the stylesheet.
 - Error messages sent to clients never contain server paths (the profile is named
   `profile.yaml`, the data directory "the data directory").
 - `storage.FileStorage(data_dir)`: `profile.yaml` (hand-edited, never written by the
@@ -586,6 +628,8 @@ behaviour shows up as a failing test. Layout:
       settings.py      environment and .env     files.py        atomic file writes
       services.py      use cases (pure)         storage.py      data directory adapter
       api.py           FastAPI app (`serve`)
+      web/             web app (index.html, app.css, app.js, api.js, dom.js, sw.js,
+                       manifest.json, icons/)
       cli.py           Typer commands           launcher.py     script entry point
 
 ## Disclaimer

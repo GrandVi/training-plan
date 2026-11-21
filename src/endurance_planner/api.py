@@ -9,6 +9,7 @@ never returned or logged.
 import datetime as dt
 import hmac
 import logging
+import mimetypes
 import os
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -42,6 +43,10 @@ from endurance_planner.settings import intervals_settings
 from endurance_planner.storage import LOCK_TIMEOUT_S, FileStorage
 from endurance_planner.swap import SwapError
 from endurance_planner.validation import PlanValidationError
+
+# Same content types on every Python version and system (the web app is ES modules).
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 LOCAL_HOST = "127.0.0.1"
 MIN_TOKEN_LENGTH = 16
@@ -87,16 +92,17 @@ class _Body(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
-class GenerateBody(_Body):
-    expected_revision: int = Field(ge=0, description="Current revision (0 when there is no plan)")
-    dry_run: bool = False
-    start: dt.date | None = Field(None, description="First Monday (default: next Monday)")
-
-
 class MutationBody(_Body):
     expected_revision: int = Field(ge=0, description="Revision the change is based on")
     dry_run: bool = Field(False, description="Return the changes, store nothing")
     force: bool = Field(False, description="Store the change even if it breaks a rule")
+
+
+class GenerateBody(MutationBody):
+    """expected_revision is 0 when there is no plan yet; force has no effect (a generated
+    plan always passes every rule, or generation fails)."""
+
+    start: dt.date | None = Field(None, description="First Monday (default: next Monday)")
 
 
 class AmendBody(MutationBody):
