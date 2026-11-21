@@ -174,6 +174,112 @@ replan never touches a pinned session. A fresh `plan generate` starts clean. The
 not change, so unchanged sessions keep their intervals.icu event and `push` only updates the
 differences.
 
+## Using it from several devices
+
+The planner runs on one machine (a Raspberry Pi at home) and is used from a laptop and an
+Android phone through a web app, over Tailscale. Nothing is exposed to the internet.
+
+    phone / laptop browser (web app, installable)
+        |  HTTPS, inside your tailnet only
+        v
+    tailscale serve on the Pi  -->  http://127.0.0.1:8000  endurance-planner serve
+                                        |  api.py (FastAPI adapter, token, errors)
+                                        |  services.py (use cases, revisions)
+                                        |  planning library (pure core)
+                                        v
+                                    /var/lib/endurance-planner/
+                                        profile.yaml   (edited by hand)
+                                        plans/<id>.json, current
+
+Layers: the **core** (planning library and `services.py`) does no file, network,
+environment or clock access; the **adapters** do: the **CLI** works on the files named on
+its command line, the **API** on a data directory through `storage.FileStorage`, and the
+**web app** (static files served by the API) only talks to the API. The CLI and the API run
+the same use cases, so a plan changed in one is valid for the other.
+
+Rules to know:
+- One **token** (`PLANNER_TOKEN`) protects the API; the app asks for it once per device.
+- Every change carries the plan's **revision**: a change made from a device whose view is
+  out of date is refused (409, "The plan changed elsewhere"); reload and redo it.
+- Every change is **previewed first** (dry run) and applied only when you confirm.
+- **profile.yaml** stays hand-edited on the Pi; after editing it, open Settings in the app
+  and run "Preview a replan".
+- The **intervals.icu key** lives only in the Pi's environment file; devices never see it.
+
+### Raspberry Pi + Tailscale, step by step
+
+Raspberry Pi OS 64-bit (Bookworm, Python 3.11), as a user with `sudo`.
+
+1. Packages and a dedicated user:
+
+       sudo apt update && sudo apt install -y git python3-venv
+       sudo useradd --system --home-dir /var/lib/endurance-planner --shell /usr/sbin/nologin planner
+       sudo install -d -o planner -g planner -m 700 /var/lib/endurance-planner
+
+2. Install the planner in its own virtual environment:
+
+       sudo git clone https://github.com/GrandVi/training-plan /opt/endurance-planner/src
+       sudo python3 -m venv /opt/endurance-planner/venv
+       sudo /opt/endurance-planner/venv/bin/pip install "/opt/endurance-planner/src[api,http,cli]"
+
+3. Your profile (from your laptop, or start from the example):
+
+       sudo install -o planner -g planner -m 600 profile.yaml /var/lib/endurance-planner/profile.yaml
+
+4. Secrets: copy the example environment file, then fill in `PLANNER_TOKEN` (generate it
+   with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`) and, to push to
+   intervals.icu, `INTERVALS_API_KEY`:
+
+       sudo install -m 600 -o root -g root /opt/endurance-planner/src/deploy/endurance-planner.env.example /etc/endurance-planner.env
+       sudo nano /etc/endurance-planner.env
+
+5. Start the service (it listens on `127.0.0.1:8000` only, restarts on failure, and runs
+   with a read-only system except its data directory):
+
+       sudo cp /opt/endurance-planner/src/deploy/endurance-planner.service /etc/systemd/system/
+       sudo systemctl daemon-reload
+       sudo systemctl enable --now endurance-planner
+       systemctl status endurance-planner
+       curl http://127.0.0.1:8000/health          # {"status":"ok",...}
+
+6. Tailscale on the Pi: install it (instructions on tailscale.com for Debian / Raspberry Pi
+   OS), then `sudo tailscale up`. In the Tailscale admin console, enable **MagicDNS** and
+   **HTTPS certificates** (DNS page). Then publish the planner to your tailnet only:
+
+       sudo tailscale serve --bg 8000              # https://<pi-name>.<tailnet>.ts.net -> 127.0.0.1:8000
+       tailscale serve status
+       # to stop: sudo tailscale serve reset
+
+   `--bg` keeps it running in the background and across reboots. Check the exact syntax with
+   `tailscale serve --help` on your version: the serve command changed in Tailscale 1.52.
+
+7. Phone: install the Tailscale app, log in to the same tailnet, open
+   `https://<pi-name>.<tailnet>.ts.net`, enter the token, then "Add to Home screen" (or
+   "Install app") from the browser menu. Laptop: same URL in a browser on the tailnet.
+
+Never use **Tailscale Funnel** (it publishes to the whole internet) and never forward a
+router port to the Pi: the planner is meant to be reachable from your tailnet only. To limit
+it further, restrict the Pi's port 443 to your own devices in the tailnet access controls.
+
+Day to day:
+- Update: `cd /opt/endurance-planner/src && sudo git pull && sudo /opt/endurance-planner/venv/bin/pip install ".[api,http,cli]" && sudo systemctl restart endurance-planner`.
+- Logs: `journalctl -u endurance-planner` (no token or intervals.icu key is ever logged).
+- New token: edit `/etc/endurance-planner.env`, `sudo systemctl restart endurance-planner`,
+  then "Forget the token" and enter the new one on each device.
+- Backup: copy `/var/lib/endurance-planner` (profile and plans).
+
+Docker (optional, arm64 and amd64): `docker buildx build --platform linux/arm64,linux/amd64
+-t endurance-planner .`, then run it with the port published on `127.0.0.1` only, as shown at
+the top of the `Dockerfile`, and put `tailscale serve --bg 8000` in front of it the same way.
+
+Locally, for a try on a laptop:
+
+    pip install -e ".[api,http,cli]"
+    mkdir -p ~/planner-data && cp examples/profile.example.yaml ~/planner-data/profile.yaml
+    export PLANNER_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+    endurance-planner serve --data-dir ~/planner-data
+    # open http://127.0.0.1:8000/ and paste $PLANNER_TOKEN once
+
 ## HTTP API
 
 `endurance-planner serve --data-dir PATH` (extra `api`) serves a JSON API and the web app on
@@ -222,20 +328,28 @@ Rules:
   (`Content-Security-Policy` with `'self'` only, `X-Content-Type-Options`, `X-Frame-Options`,
   `Referrer-Policy`).
 
-Sample dry run:
+Sample dry run (example profile, abbreviated):
 
     POST /plan/amend
-    {"expected_revision": 0, "date": "2026-12-08", "minutes": 40, "dry_run": true}
+    {"expected_revision": 0, "date": "2026-12-08", "minutes": 40,
+     "reason": "short on time", "dry_run": true}
 
+    200 OK
     {"plan_id": "victor-20261116", "revision": 0, "dry_run": true, "applied": true,
      "refused": false, "changed": true, "message": "amendment a1: 40 min (scope rest)",
-     "amendment": {"id": "a1", "date": "2026-12-08", "minutes": 40, ...},
-     "changes": [{"date": "2026-12-08", "code": "amended",
-                  "before": {"name": "Cruise intervals 3x10 min", "duration_s": 3360, ...},
-                  "after": {"name": "Cruise intervals 3x8 min, shorter reps",
-                            "duration_s": 2400, "pinned": true, ...},
-                  "line": "2026-12-08 amended ..."}, ...],
-     "issues": [{"severity": "warning", "code": "amend_shortened", ...}]}
+     "amendment": {"id": "a1", "kind": "session", "date": "2026-12-08", "minutes": 40,
+                   "scope": "rest", "reason": "short on time", "original": {...}, ...},
+     "changes": [
+       {"date": "2026-12-08", "code": "amended",
+        "before": {"name": "Cruise intervals 3x10 min", "sport": "run", "duration_s": 3360,
+                   "tss": 71.7, "slot": "key_1", "pinned": false, ...},
+        "after": {"name": "Cruise intervals 3x8 min, shorter reps", "duration_s": 2400,
+                  "tss": 52.0, "pinned": true, "amendment_id": "a1", ...},
+        "line": "2026-12-08 amended  Run 56m Cruise intervals 3x10 min [key_1] -> ..."},
+       {"date": "2026-12-20", "code": "rebalanced", ...},
+       ... 21 more],
+     "issues": [{"severity": "warning", "code": "amend_shortened", "week": 4,
+                 "message": "2026-12-08 Cruise intervals 3x10 min: first rung with shorter reps"}]}
 
 ## Web app
 
@@ -394,6 +508,9 @@ Zwift / FIT files are not generated here: intervals.icu can export them from the
   only go down, but their mix can change within them (for example shorter long runs leave
   run volume for a key session that did not fit before).
 - One session per day; no double days, no strength work, no swimming.
+- One athlete, one token, no user accounts. The profile is edited on the server
+  (`profile.yaml`), not in the web app. Every change from the app needs a connection; offline,
+  only the weeks already opened on the device can be read.
 - Races are not sessions: the race day is kept free and its load is not counted.
 - Load is planned from targets, not measured: real TSS will differ, mostly on variable terrain.
 - By time in zone, plans land around 85-95% low intensity: the 20% is used as a ceiling,
@@ -521,6 +638,14 @@ Services and storage:
   changes.
 - Colours meet WCAG AA (4.5:1 for text, 3:1 for the focus ring) in light and dark themes;
   `tests/test_web.py` computes the ratios from the stylesheet.
+- Deployment defaults: user `planner`, code in `/opt/endurance-planner` (git checkout +
+  virtual environment), data in `/var/lib/endurance-planner`, secrets in
+  `/etc/endurance-planner.env` (root, mode 600, read by systemd before it drops privileges),
+  port 8000 on `127.0.0.1`, HTTPS and device access by `tailscale serve`. The Docker image
+  runs as a non-root user with the data in a volume; inside the container the server binds
+  `0.0.0.0` (still token-protected) and the port is published on `127.0.0.1` only.
+- The server reads its settings from the process environment only (no `.env` file), so
+  the environment file of the service is the single place for secrets.
 - Error messages sent to clients never contain server paths (the profile is named
   `profile.yaml`, the data directory "the data directory").
 - `storage.FileStorage(data_dir)`: `profile.yaml` (hand-edited, never written by the
@@ -596,7 +721,12 @@ Changing a plan in progress:
 - **Scheduler with fixed sessions**: `Scheduler.build_week(sk, history, pinned=WeekPins(...))`
   builds a week around fixed sessions; `Scheduler.seed` sets the progression state from weeks
   already built or done. `replan.replan_plan` combines both.
-- **Front-end**: call `planner.generate_plan`, `amend.amend_session`, `amend.add_unavailable`,
+- **New API route or screen**: add the use case to `services.py` (pure, returns a pydantic
+  model), the route to `api.py` (parsing and error mapping only) with a test in
+  `tests/test_api.py`, then the screen to `web/app.js`; new web files go in the service
+  worker's `SHELL` list (`tests/test_web.py` checks they are served).
+- **Front-end**: use the HTTP API (see "HTTP API"), or in Python `services.py`; or call
+  `planner.generate_plan`, `amend.amend_session`, `amend.add_unavailable`,
   `amend.undo_amendment`, `replan.replan`, `swap.swap_session`, `planner.retarget_plan`,
   `validation.validate_plan` and the `export` functions directly; the plan is a pydantic model
   (`Plan > Week > Session > Step | Repeat`) with a stable JSON form.

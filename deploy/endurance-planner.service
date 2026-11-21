@@ -1,0 +1,53 @@
+# systemd unit for the endurance-planner API and web app (Raspberry Pi OS 64-bit or any
+# systemd Linux). Install: see README, "Using it from several devices".
+#   sudo cp deploy/endurance-planner.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now endurance-planner
+
+[Unit]
+Description=endurance-planner API and web app
+Documentation=https://github.com/GrandVi/training-plan#using-it-from-several-devices
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=planner
+Group=planner
+# PLANNER_TOKEN, PLANNER_DATA_DIR, INTERVALS_API_KEY, INTERVALS_ATHLETE_ID (root-only file).
+EnvironmentFile=/etc/endurance-planner.env
+WorkingDirectory=/var/lib/endurance-planner
+# Listens on this machine only: other devices come through `tailscale serve` (HTTPS).
+ExecStart=/opt/endurance-planner/venv/bin/endurance-planner serve --data-dir /var/lib/endurance-planner --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+# Hardening: read-only system, writable data directory only, no privileges.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/endurance-planner
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+[Install]
+WantedBy=multi-user.target
