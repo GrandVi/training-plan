@@ -405,3 +405,17 @@ def test_plan_replan(plan_path: Path, profile_path: Path, tmp_path: Path) -> Non
     edited.write_text(yaml.safe_dump(data), encoding="utf-8")
     moved = runner.invoke(app, [*args[:-2], "--today", "2027-01-20"])
     assert moved.exit_code == 1 and "skeleton_changed" in moved.output
+
+
+def test_cli_mutations_count_revisions(plan_path: Path, profile_path: Path, tmp_path: Path) -> None:
+    path = _copy(plan_path, tmp_path)
+    assert '"revision"' not in path.read_text(encoding="utf-8")  # a fresh plan: unchanged file
+    date = _key_date(path, 5)
+    args = ["plan", "amend", str(path), "--date", date, "--minutes", "40", "-p", str(profile_path)]
+    assert runner.invoke(app, [*args, *TODAY]).exit_code == 0
+    assert load_plan(path).revision == 1
+    assert runner.invoke(app, [*args, *TODAY]).exit_code == 0  # same amendment: no change
+    assert load_plan(path).revision == 1
+    swap = ["plan", "swap", str(path), "--date", _key_date(path, 7), "-p", str(profile_path)]
+    runner.invoke(app, [*swap, "--force", *TODAY])
+    assert load_plan(path).revision == 2

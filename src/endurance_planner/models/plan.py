@@ -10,7 +10,14 @@ import datetime as dt
 from collections.abc import Iterable, Iterator
 from typing import Any, Self
 
-from pydantic import BaseModel, Field, computed_field, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    computed_field,
+    model_serializer,
+    model_validator,
+)
 
 from endurance_planner.load import steps_tss
 from endurance_planner.models.enums import (
@@ -242,11 +249,22 @@ class Plan(BaseModel):
     weeks: list[Week]
     warnings: list[Issue] = Field(default_factory=list)
     amendments: list[Amendment] = Field(default_factory=list)
+    # Version of the stored plan: every saved change made through the services adds 1, and a
+    # change based on an older revision is refused (services.RevisionConflict). Files without
+    # it read as 0, and 0 is not written, so a freshly generated plan file is unchanged.
+    revision: int = Field(0, ge=0)
 
     @model_validator(mode="before")
     @classmethod
     def _migrate(cls, data: Any) -> Any:
         return migrate_plan_data(data)
+
+    @model_serializer(mode="wrap")
+    def _omit_initial_revision(self, handler: SerializerFunctionWrapHandler) -> Any:
+        data = handler(self)
+        if self.revision == 0 and isinstance(data, dict):
+            data.pop("revision", None)
+        return data
 
     def active_amendments(self, kind: AmendmentKind | None = None) -> list[Amendment]:
         return [a for a in self.amendments if a.active and (kind is None or a.kind is kind)]

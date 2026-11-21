@@ -7,43 +7,31 @@ from typing import Annotated
 
 import typer
 
-from endurance_planner.amend import (
-    AmendError,
-    AmendResult,
-    SessionEdit,
-    add_unavailable,
-    amend_session,
-    amendment_lines,
-    swap_sport,
-    undo_amendment,
-)
+from endurance_planner import services
+from endurance_planner.amend import AmendError
 from endurance_planner.config import ProfileError, load_profile
 from endurance_planner.export.intervals_icu import (
     IntervalsClient,
     IntervalsError,
     clear_events,
-    plan_events,
-    push_plan,
     remote_thresholds,
     threshold_diffs,
     update_yaml_scalars,
 )
 from endurance_planner.export.json_io import load_plan, save_plan
-from endurance_planner.export.markdown import fitness_csv, render_markdown, weekly_csv
+from endurance_planner.export.markdown import render_markdown
 from endurance_planner.models.enums import BikeActivity, GoalType, Intent, Scope, Severity, Sport
 from endurance_planner.models.issues import Issue
 from endurance_planner.models.plan import Plan
 from endurance_planner.models.profile import Profile
 from endurance_planner.periodization import PlanningError
-from endurance_planner.planner import generate_plan, retarget_plan
-from endurance_planner.profile_tools import dump_profile, starter_profile, zone_report
-from endurance_planner.replan import ReplanResult, change_lines, replan_plan
+from endurance_planner.profile_tools import dump_profile, starter_profile
 from endurance_planner.rules import DEFAULT_SCOPE
 from endurance_planner.schemas import plan_json_schema, profile_json_schema
 from endurance_planner.settings import environment, intervals_settings
 from endurance_planner.swap import SwapError
 from endurance_planner.thresholds import resolve_thresholds
-from endurance_planner.validation import PlanValidationError, validate_plan
+from endurance_planner.validation import PlanValidationError
 
 app = typer.Typer(no_args_is_help=True, help="Multi-sport training plan generator.")
 profile_app = typer.Typer(no_args_is_help=True, help="Create and check the athlete profile.")
@@ -131,24 +119,23 @@ ReasonOption = Annotated[str, typer.Option(help="Why (kept in the amendment log)
 
 
 def _changes(
-    result: AmendResult | ReplanResult,
+    outcome: services.Outcome,
     plan: Path,
     out: Path | None,
     *,
-    dry_run: bool,
-    force: bool,
     refused: str = "not applied: the plan would break at least one rule (use --force)",
 ) -> None:
     """Print the changes and issues, then write the plan unless refused or a dry run."""
-    for line in change_lines(result.changes):
+    result = outcome.result
+    for line in services.change_lines(result):
         typer.echo(line)
     _print_issues(result.issues)
-    if dry_run:
+    if result.dry_run:
         typer.echo("dry run: nothing written", err=True)
         return
-    if result.errors and not force:
+    if outcome.stored is None:
         raise _fail(refused)
-    save_plan(result.plan, out or plan)
+    save_plan(outcome.stored, out or plan)
     typer.echo(f"wrote {out or plan}", err=True)
 
 
@@ -175,7 +162,7 @@ def profile_validate(
     profile: ProfileOption = Path("profile.yaml"), today: TodayOption = None
 ) -> None:
     """Check the profile and print the resolved zone tables."""
-    typer.echo(zone_report(_profile(profile), _date(today)), nl=False)
+    typer.echo(services.profile_text(_profile(profile), _date(today)), nl=False)
 
 
 @profile_app.command("schema")
@@ -244,12 +231,13 @@ def plan_generate(
     """Generate a plan from the profile and write it as JSON."""
     athlete = _profile(profile)
     try:
-        plan = generate_plan(athlete, _date(today), _date(start) if start else None)
+        outcome = services.generate_plan(athlete, _date(today), _date(start) if start else None)
     except (PlanningError, PlanValidationError) as exc:
         raise _fail(str(exc)) from exc
-    _print_issues(plan.warnings)
+    plan = outcome.candidate
+    _print_issues(outcome.result.issues)
     save_plan(plan, out)
-    typer.echo(f"wrote {out}: {len(plan.weeks)} weeks from {plan.weeks[0].start}", err=True)
+    typer.echo(f"wrote {out}: {outcome.result.message}", err=True)
     if markdown is not None:
         _write(render_markdown(plan, athlete), markdown)
 
@@ -271,14 +259,11 @@ def plan_show(
 ) -> None:
     """Print a plan as Markdown, a weekly CSV, or a daily CTL/ATL/TSB CSV."""
     loaded, athlete = _plan(plan), _profile(profile)
-    if fmt == "md":
-        _write(render_markdown(loaded, athlete, weeks=week, details=details), out)
-    elif fmt == "csv":
-        _write(weekly_csv(loaded, athlete), out)
-    elif fmt == "fitness-csv":
-        _write(fitness_csv(loaded, athlete), out)
-    else:
-        raise _fail(f"unknown format '{fmt}' (md, csv, fitness-csv)")
+    try:
+        text = services.render_plan(loaded, athlete, fmt, weeks=week, details=details)
+    except services.UnknownFormat as exc:
+        raise _fail(str(exc)) from exc
+    _write(text, out)
 
 
 @plan_app.command("validate")
@@ -287,11 +272,10 @@ def plan_validate(
 ) -> None:
     """Check a plan against every rule; exit code 1 if there are errors."""
     loaded = _plan(plan)
-    issues = validate_plan(loaded, _profile(profile), _date(today, loaded.created))
-    _print_issues(issues)
-    errors = sum(issue.severity is Severity.ERROR for issue in issues)
-    typer.echo(f"{errors} error(s), {len(issues) - errors} warning(s)")
-    if errors:
+    report = services.validate_plan(loaded, _profile(profile), _date(today, loaded.created))
+    _print_issues(report.issues)
+    typer.echo(f"{report.errors} error(s), {report.warnings} warning(s)")
+    if report.errors:
         raise typer.Exit(code=1)
 
 
@@ -305,9 +289,12 @@ def plan_retarget(
     today: TodayOption = None,
 ) -> None:
     """Recompute absolute targets after a threshold change; structure and dates are kept."""
-    updated, issues = retarget_plan(_plan(plan), _profile(profile), _date(today))
-    _print_issues(issues)
-    save_plan(updated, out or plan)
+    loaded = _plan(plan)
+    outcome = services.retarget(
+        loaded, _profile(profile), _date(today), expected_revision=loaded.revision
+    )
+    _print_issues(outcome.result.issues)
+    save_plan(outcome.candidate, out or plan)
     typer.echo(f"wrote {out or plan}", err=True)
 
 
@@ -330,15 +317,21 @@ def plan_swap(
     """
     loaded, athlete = _plan(plan), _profile(profile)
     try:
-        result = swap_sport(loaded, athlete, _date(today), _date(date), force=force)
+        outcome = services.swap(
+            loaded,
+            athlete,
+            _date(today),
+            _date(date),
+            expected_revision=loaded.revision,
+            force=force,
+        )
     except (AmendError, SwapError) as exc:
         raise _fail(str(exc)) from exc
-    _print_issues(result.issues)
-    if result.errors and not force:
+    _print_issues(outcome.result.issues)
+    if outcome.stored is None:
         raise _fail("swap not applied: it breaks at least one rule (use --force to apply anyway)")
-    save_plan(result.plan, out or plan)
-    session = next(s for week in result.plan.weeks for s in week.sessions if s.date == _date(date))
-    typer.echo(f"{session.date}: now a {session.sport.value} session, {session.name}", err=True)
+    save_plan(outcome.stored, out or plan)
+    typer.echo(outcome.result.message, err=True)
 
 
 @plan_app.command("amend")
@@ -368,30 +361,32 @@ def plan_amend(
     """Change one session (shorter, other sport or bike, easier, skipped, moved); the rest
     of the plan adapts according to --scope. The session is pinned and the change logged."""
     loaded, athlete = _plan(plan), _profile(profile)
-    edit = SessionEdit(
+    request = services.AmendRequest(
+        date=_date(date),
         minutes=minutes,
         sport=sport,
         activity=activity,
         intent=intent,
         skip=skip,
         move_to=_date(move_to) if move_to else None,
+        scope=scope,
+        reason=reason,
     )
     try:
-        result = amend_session(
+        outcome = services.amend(
             loaded,
             athlete,
             _date(today),
-            _date(date),
-            edit,
-            scope=scope,
-            reason=reason,
+            request,
+            expected_revision=loaded.revision,
+            dry_run=dry_run,
             force=force,
         )
     except (AmendError, SwapError, PlanningError) as exc:
         raise _fail(str(exc)) from exc
-    if result.amendment is not None:
-        typer.echo(f"amendment {result.amendment.id}: {edit.describe()} (scope {scope})", err=True)
-    _changes(result, plan, out, dry_run=dry_run, force=force)
+    if outcome.result.message:
+        typer.echo(outcome.result.message, err=True)
+    _changes(outcome, plan, out)
 
 
 def _day_minutes(value: str | None) -> dict[Sport, int] | None:
@@ -432,25 +427,29 @@ def plan_unavailable(
 ) -> None:
     """Make days unavailable or limited (same rules as availability.exceptions) and adapt."""
     loaded, athlete = _plan(plan), _profile(profile)
+    request = services.UnavailableRequest(
+        start=_date(date_from),
+        end=_date(date_to) if date_to else None,
+        minutes=_day_minutes(minutes),
+        activity=activity,
+        scope=scope,
+        reason=reason,
+    )
     try:
-        result = add_unavailable(
+        outcome = services.declare_unavailable(
             loaded,
             athlete,
             _date(today),
-            _date(date_from),
-            _date(date_to) if date_to else None,
-            _day_minutes(minutes),
-            activity,
-            scope=scope,
-            reason=reason,
+            request,
+            expected_revision=loaded.revision,
+            dry_run=dry_run,
             force=force,
         )
     except (AmendError, PlanningError) as exc:
         raise _fail(str(exc)) from exc
-    if result.amendment is not None:
-        label = result.amendment.as_exception().label()
-        typer.echo(f"amendment {result.amendment.id}: unavailable {label}", err=True)
-    _changes(result, plan, out, dry_run=dry_run, force=force)
+    if outcome.result.message:
+        typer.echo(outcome.result.message, err=True)
+    _changes(outcome, plan, out)
 
 
 @plan_app.command("replan")
@@ -465,10 +464,17 @@ def plan_replan(
     """Rebuild the plan from today after editing profile.yaml; past and pinned sessions stay."""
     loaded, athlete = _plan(plan), _profile(profile)
     try:
-        result = replan_plan(loaded, athlete, _date(today))
+        outcome = services.replan(
+            loaded,
+            athlete,
+            _date(today),
+            expected_revision=loaded.revision,
+            dry_run=dry_run,
+            force=force,
+        )
     except PlanningError as exc:
         raise _fail(str(exc)) from exc
-    _changes(result, plan, out, dry_run=dry_run, force=force)
+    _changes(outcome, plan, out)
 
 
 @plan_app.command("amendments")
@@ -486,15 +492,23 @@ def plan_amendments(
     """List the plan's amendments, or undo one."""
     loaded = _plan(plan)
     if undo is None:
-        for line in amendment_lines(loaded):
+        for line in [view.line for view in services.list_amendments(loaded)] or ["no amendment"]:
             typer.echo(line)
         return
     try:
-        result = undo_amendment(loaded, _profile(profile), _date(today), undo)
+        outcome = services.undo_amendment(
+            loaded,
+            _profile(profile),
+            _date(today),
+            undo,
+            expected_revision=loaded.revision,
+            dry_run=dry_run,
+            force=force,
+        )
     except (AmendError, PlanningError) as exc:
         raise _fail(str(exc)) from exc
-    typer.echo(f"amendment {undo} undone", err=True)
-    _changes(result, plan, out, dry_run=dry_run, force=force)
+    typer.echo(outcome.result.message, err=True)
+    _changes(outcome, plan, out)
 
 
 @profile_app.command("sync-intervals")
@@ -559,38 +573,37 @@ def push(
 ) -> None:
     """Push the plan to the intervals.icu calendar (idempotent: re-running updates)."""
     loaded = _plan(plan)
-    start = _date(date_from) if date_from else _date(today)
-    end = _date(date_to) if date_to else None
+    request = services.PushRequest(
+        dry_run=dry_run,
+        start=_date(date_from) if date_from else _date(today),
+        end=_date(date_to) if date_to else None,
+        absolute_targets=absolute_targets,
+        prune=prune,
+        only_changed=only_changed,
+    )
     if dry_run:
-        typer.echo(json.dumps(plan_events(loaded, start, end, absolute_targets), indent=2))
+        report = services.push_plan(loaded, None, _date(today), request)
+        typer.echo(json.dumps(report.payloads, indent=2))
         return
-    local, _ = resolve_thresholds(_profile(profile), _date(today))
+    athlete = _profile(profile)
     try:
-        client = make_client(athlete_id, verbose)
-        diffs = threshold_diffs(local, remote_thresholds(client.athlete()))
-        if diffs and not absolute_targets:
-            typer.secho(
-                "warning: thresholds differ between the profile and intervals.icu; relative "
-                "targets are resolved by intervals.icu with ITS settings:",
-                fg=typer.colors.YELLOW,
-                err=True,
-            )
-            for diff in diffs:
-                typer.secho(f"  {diff.label}", fg=typer.colors.YELLOW, err=True)
-        result = push_plan(
-            client,
-            loaded,
-            start=start,
-            end=end,
-            absolute=absolute_targets,
-            prune=prune,
-            only_changed=only_changed,
+        report = services.push_plan(
+            loaded, athlete, _date(today), request, make_client(athlete_id, verbose)
         )
     except IntervalsError as exc:
         raise _fail(str(exc)) from exc
-    unchanged = f", {result.unchanged} unchanged" if result.unchanged else ""
+    if report.threshold_diffs and not absolute_targets:
+        typer.secho(
+            "warning: thresholds differ between the profile and intervals.icu; relative "
+            "targets are resolved by intervals.icu with ITS settings:",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        for label in report.threshold_diffs:
+            typer.secho(f"  {label}", fg=typer.colors.YELLOW, err=True)
+    unchanged = f", {report.unchanged} unchanged" if report.unchanged else ""
     typer.echo(
-        f"pushed {result.upserted} workout(s), removed {result.pruned} stale event(s){unchanged}"
+        f"pushed {report.upserted} workout(s), removed {report.pruned} stale event(s){unchanged}"
     )
 
 

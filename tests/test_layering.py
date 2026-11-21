@@ -21,6 +21,7 @@ ADAPTERS = {
     "endurance_planner.http_transport",
     "endurance_planner.launcher",
     "endurance_planner.settings",
+    "endurance_planner.storage",
 }
 FRAMEWORKS = {"typer", "click", "httpx", "fastapi", "starlette", "uvicorn"}
 SYSTEM = {"os", "pathlib", "shutil", "tempfile", "fcntl", "glob", "subprocess", "socket"}
@@ -62,6 +63,7 @@ def _imports(tree: ast.AST, module: str) -> list[tuple[str, bool]]:
 
 def test_every_listed_adapter_exists() -> None:
     assert set(MODULES) >= ADAPTERS
+    assert "endurance_planner.services" in CORE
 
 
 @pytest.mark.parametrize("module", CORE)

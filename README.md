@@ -396,6 +396,27 @@ Tooling:
   `IntervalsClient` (or none) is wrapped in the httpx adapter, imported lazily; and
   `load_env_file` is still importable from `export.intervals_icu` (it lives in `settings`).
   These two lazy imports are the only adapter imports the layering test allows in the core.
+
+Services and storage:
+- `services.py` holds the use cases (generate, validate, show a week, amend, declare
+  unavailable, replan, list and undo amendments, swap, retarget, push). They call the
+  library and return pydantic models (`MutationResult`, `WeekView`, `PushReport`...). The CLI
+  and the HTTP API both call them. `profile init`, `profile sync-intervals` and `clear` stay
+  direct library calls: they are interactive or only talk to intervals.icu.
+- A mutation is `applied` unless it breaks a rule without `force` (`refused`); a dry run
+  reports what would be stored and stores nothing.
+- `Plan.revision` is the version of the stored plan. It goes up by 1 each time a mutation
+  changes the stored plan (a no-op, a dry run or a refused change keeps it). Regenerating a
+  plan over an existing one continues its revision, so other devices see the change. A
+  mutation based on another revision raises `RevisionConflict`. The CLI checks against the
+  file it has just read. The field is optional: plans without it read as revision 0, and 0 is
+  not written, so `schema_version` stays 2 and a freshly generated plan file is unchanged.
+- `storage.FileStorage(data_dir)`: `profile.yaml` (hand-edited, never written by the
+  services), `plans/<id>.json`, `current` (id of the current plan), `.lock`. Writes go to a
+  temporary file that is renamed over the target; leftovers of a crash (`.<name>.tmp`) are
+  ignored. The lock is an exclusive `flock` on `.lock` (released if the process dies), waited
+  for up to 10 s, then `StorageBusy`. The CLI keeps working on the files named on its command
+  line; only the API uses a data directory.
 - Plan files carry `schema_version` (now 2). Version 1 files are upgraded in memory when they
   are read (new fields take their defaults) and written back as version 2; newer versions are
   refused with a message asking to update the tool.
@@ -493,6 +514,7 @@ behaviour shows up as a failing test. Layout:
       serialization.py profile YAML / plan JSON text forms (pure)
       transport.py     HTTP protocol + fake     http_transport.py  httpx adapter
       settings.py      environment and .env     files.py        atomic file writes
+      services.py      use cases (pure)         storage.py      data directory adapter
       cli.py           Typer commands           launcher.py     script entry point
 
 ## Disclaimer
