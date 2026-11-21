@@ -1,29 +1,12 @@
-"""Profile loading."""
+"""Adapter: profile loading from a file (parsing is in serialization.py)."""
 
 from pathlib import Path
 
-import yaml
-from pydantic import ValidationError
-
 from endurance_planner.models.profile import Profile
+from endurance_planner.serialization import ProfileError, parse_profile
 
-
-class ProfileError(ValueError):
-    """profile.yaml is unreadable or invalid; the message lists every problem."""
+__all__ = ["ProfileError", "load_profile"]
 
 
 def load_profile(path: Path) -> Profile:
-    try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
-        raise ProfileError(f"{path}: invalid YAML: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ProfileError(f"{path}: expected a YAML mapping at top level")
-    try:
-        return Profile.model_validate(data)
-    except ValidationError as exc:
-        lines = [
-            f"  {'.'.join(str(part) for part in err['loc']) or '<profile>'}: {err['msg']}"
-            for err in exc.errors()
-        ]
-        raise ProfileError(f"{path}: invalid profile\n" + "\n".join(lines)) from exc
+    return parse_profile(path.read_text(encoding="utf-8"), str(path))

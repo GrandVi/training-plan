@@ -1,17 +1,18 @@
-"""Canonical JSON form of a plan."""
+"""Adapter: plan files (the JSON form itself is in serialization.py)."""
 
 from pathlib import Path
 
+from endurance_planner.files import write_text_atomic
 from endurance_planner.models.plan import Plan
+from endurance_planner.serialization import dump_plan, parse_plan
 
-
-def dump_plan(plan: Plan) -> str:
-    return plan.model_dump_json(indent=2) + "\n"
+__all__ = ["dump_plan", "load_plan", "save_plan"]
 
 
 def save_plan(plan: Plan, path: Path) -> None:
-    path.write_text(dump_plan(plan), encoding="utf-8")
+    """Write the plan atomically (a reader never sees a half-written file)."""
+    write_text_atomic(path, dump_plan(plan))
 
 
 def load_plan(path: Path) -> Plan:
-    return Plan.model_validate_json(path.read_text(encoding="utf-8"))
+    return parse_plan(path.read_text(encoding="utf-8"))

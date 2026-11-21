@@ -17,6 +17,7 @@ Not supported by the text syntax, and how it is handled here:
 - Absolute HR in bpm is not documented: HR targets stay in % LTHR even with absolute targets.
 """
 
+import base64
 import datetime as dt
 import re
 import time
@@ -24,11 +25,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
-
 from endurance_planner.models.enums import Sport, StepKind, TargetKind
 from endurance_planner.models.plan import Plan, Repeat, Session, Step, flatten
 from endurance_planner.thresholds import ResolvedThresholds
+from endurance_planner.transport import Response, Transport, TransportError
 from endurance_planner.units import format_clock
 from endurance_planner.zones import rpe_to_if
 
@@ -191,7 +191,12 @@ Logger = Callable[[str], None]
 
 
 class IntervalsClient:
-    """Minimal intervals.icu API client (API key, HTTP Basic with username API_KEY)."""
+    """Minimal intervals.icu API client (API key, HTTP Basic with username API_KEY).
+
+    HTTP goes through `transport` (see transport.Transport). For compatibility, an httpx
+    transport (e.g. httpx.MockTransport) or no transport at all is wrapped in the httpx
+    adapter, which needs the `http` extra.
+    """
 
     def __init__(
         self,
@@ -199,7 +204,7 @@ class IntervalsClient:
         athlete_id: str = "0",
         *,
         base_url: str = BASE_URL,
-        transport: httpx.BaseTransport | None = None,
+        transport: Transport | object | None = None,
         timeout_s: float = 30.0,
         max_retries: int = 4,
         backoff_s: float = 1.0,
@@ -209,20 +214,24 @@ class IntervalsClient:
         self.athlete_id = athlete_id
         self.max_retries = max_retries
         self.backoff_s = backoff_s
+        self._base_url = base_url.rstrip("/")
+        self._timeout_s = timeout_s
         self._sleep = sleep
         self._log = log
-        self._http = httpx.Client(
-            base_url=base_url, auth=("API_KEY", api_key), timeout=timeout_s, transport=transport
-        )
+        token = base64.b64encode(f"API_KEY:{api_key}".encode()).decode()
+        self._headers = {"Authorization": f"Basic {token}"}
+        self._transport = transport if isinstance(transport, Transport) else _httpx(transport)
 
     def close(self) -> None:
-        self._http.close()
+        self._transport.close()
 
     def _say(self, message: str) -> None:
         if self._log is not None:
             self._log(message)
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    def _request(
+        self, method: str, path: str, *, params: dict[str, str] | None = None, json: Any = None
+    ) -> Response:
         """Send a request; retry with exponential backoff on timeouts, 429 and 5xx."""
         url = f"/athlete/{self.athlete_id}{path}"
         problem = ""
@@ -231,15 +240,22 @@ class IntervalsClient:
                 delay = self.backoff_s * 2 ** (attempt - 1)
                 self._say(f"retry {attempt}/{self.max_retries} in {delay:g} s ({problem})")
                 self._sleep(delay)
-            self._say(f"> {method} {url} params={kwargs.get('params')} body={kwargs.get('json')}")
+            self._say(f"> {method} {url} params={params} body={json}")
             try:
-                response = self._http.request(method, url, **kwargs)
-            except httpx.TransportError as exc:
-                problem = f"{type(exc).__name__}: {exc}"
+                response = self._transport.request(
+                    method,
+                    self._base_url + url,
+                    params=params,
+                    json=json,
+                    headers=self._headers,
+                    timeout=self._timeout_s,
+                )
+            except TransportError as exc:
+                problem = str(exc)
                 continue
-            self._say(f"< {response.status_code} {response.text[:2000]}")
-            if response.status_code in RETRY_STATUS:
-                problem = f"HTTP {response.status_code}"
+            self._say(f"< {response.status} {response.text[:2000]}")
+            if response.status in RETRY_STATUS:
+                problem = f"HTTP {response.status}"
                 continue
             if response.is_success:
                 return response
@@ -274,8 +290,15 @@ class IntervalsClient:
             self._request("PUT", "/events/bulk-delete", json=body)
 
 
-def _explain(response: httpx.Response) -> str:
-    status = response.status_code
+def _httpx(transport: object | None) -> Transport:
+    """The httpx adapter around an httpx transport (or real HTTP when None)."""
+    from endurance_planner.http_transport import HttpxTransport  # adapter, extra `http`
+
+    return HttpxTransport(transport)  # type: ignore[arg-type]
+
+
+def _explain(response: Response) -> str:
+    status = response.status
     detail = response.text.strip()[:500]
     hints = {
         401: "authentication failed: check INTERVALS_API_KEY (Settings > Developer Settings)",
@@ -453,16 +476,10 @@ def update_yaml_scalars(text: str, updates: dict[tuple[str, ...], str]) -> tuple
     return "".join(lines), [".".join(path) for path in pending]
 
 
-def load_env_file(path: str = ".env") -> dict[str, str]:
-    """KEY=VALUE lines of a .env file (missing file = empty)."""
-    values: dict[str, str] = {}
-    try:
-        with open(path, encoding="utf-8") as handle:
-            for raw in handle:
-                line = raw.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, _, value = line.partition("=")
-                    values[key.strip()] = value.strip().strip("\"'")
-    except FileNotFoundError:
-        pass
-    return values
+def __getattr__(name: str) -> Any:
+    """load_env_file moved to the settings adapter (file access is not part of the core)."""
+    if name == "load_env_file":
+        from endurance_planner import settings
+
+        return settings.load_env_file
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

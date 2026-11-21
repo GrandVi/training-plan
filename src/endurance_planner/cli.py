@@ -2,7 +2,6 @@
 
 import datetime as dt
 import json
-import os
 from pathlib import Path
 from typing import Annotated
 
@@ -23,7 +22,6 @@ from endurance_planner.export.intervals_icu import (
     IntervalsClient,
     IntervalsError,
     clear_events,
-    load_env_file,
     plan_events,
     push_plan,
     remote_thresholds,
@@ -42,6 +40,7 @@ from endurance_planner.profile_tools import dump_profile, starter_profile, zone_
 from endurance_planner.replan import ReplanResult, change_lines, replan_plan
 from endurance_planner.rules import DEFAULT_SCOPE
 from endurance_planner.schemas import plan_json_schema, profile_json_schema
+from endurance_planner.settings import environment, intervals_settings
 from endurance_planner.swap import SwapError
 from endurance_planner.thresholds import resolve_thresholds
 from endurance_planner.validation import PlanValidationError, validate_plan
@@ -155,12 +154,19 @@ def _changes(
 
 def make_client(athlete_id: str | None, verbose: bool) -> IntervalsClient:
     """intervals.icu client from the environment or a .env file (the key is never stored)."""
-    env = {**load_env_file(), **os.environ}
-    api_key = env.get("INTERVALS_API_KEY")
-    if not api_key:
+    settings = intervals_settings(environment(), athlete_id)
+    if not settings.api_key:
         raise _fail("INTERVALS_API_KEY is not set (environment variable or .env file)")
+    try:
+        from endurance_planner.http_transport import HttpxTransport
+    except ImportError as exc:
+        raise _fail(
+            'intervals.icu needs the http extra: pip install "endurance-planner[http]"'
+        ) from exc
     log = (lambda message: typer.echo(message, err=True)) if verbose else None
-    return IntervalsClient(api_key, athlete_id or env.get("INTERVALS_ATHLETE_ID", "0"), log=log)
+    return IntervalsClient(
+        settings.api_key, settings.athlete_id, transport=HttpxTransport(), log=log
+    )
 
 
 # ---------------------------------------------------------------------- profile

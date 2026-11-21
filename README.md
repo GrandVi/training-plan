@@ -14,7 +14,10 @@ Supported goals: `run_5k`, `run_10k`, `run_half_marathon`, `mtb_xc`, `mtb_marath
 
 ## Quick start
 
-    pip install -e ".[dev]"
+    pip install -e ".[dev]"            # everything, for development
+    # or only what you need: core library only, or with the CLI and intervals.icu
+    pip install -e .                   # core: pydantic + PyYAML
+    pip install -e ".[cli,http]"       # + command line (typer) + intervals.icu (httpx)
 
     cp examples/profile.example.yaml profile.yaml     # or: endurance-planner profile init
     endurance-planner profile validate                # checks the file, prints your zone tables
@@ -377,6 +380,22 @@ Tooling:
 - `mypy` checks against the running interpreter (no pinned `python_version`); `ruff` targets 3.11.
 - CI (GitHub Actions) runs `pytest`, `ruff check`, `ruff format --check` and `mypy` on
   Python 3.11 and 3.12.
+- **Pure core, thin adapters.** The core (planning library and services) never reads files,
+  the environment or the clock (`today` is always a parameter) and imports no CLI, HTTP or
+  web framework. Adapters do: `cli`, `api`, `config` and `export/json_io` (profile and plan
+  files), `files`, `storage`, `settings` (environment and `.env`), `http_transport` (httpx),
+  `launcher`. `tests/test_layering.py` enforces it (static checks, plus importing every core
+  module with typer, httpx, fastapi and uvicorn blocked).
+- **Extras**: the core needs pydantic and PyYAML only; `cli` adds typer, `http` adds httpx,
+  `api` adds fastapi and uvicorn, `all` and `dev` add everything. The `endurance-planner`
+  script says which extra to install when one is missing.
+- **HTTP behind a protocol**: `IntervalsClient` sends requests through a `transport.Transport`
+  (request -> status, headers, text/json); `http_transport.HttpxTransport` is the real one,
+  `transport.FakeTransport` the in-memory one for tests. Retries, backoff, error messages and
+  logs are those of the client. For compatibility, an httpx transport given to
+  `IntervalsClient` (or none) is wrapped in the httpx adapter, imported lazily; and
+  `load_env_file` is still importable from `export.intervals_icu` (it lives in `settings`).
+  These two lazy imports are the only adapter imports the layering test allows in the core.
 - Plan files carry `schema_version` (now 2). Version 1 files are upgraded in memory when they
   are read (new fields take their defaults) and written back as version 2; newer versions are
   refused with a message asking to update the tool.
@@ -469,9 +488,12 @@ behaviour shows up as a failing test. Layout:
       periodization.py templates.py specificity.py scheduler.py planner.py
       swap.py          validation.py            adapt.py (future hook)
       replan.py        rebuild a running plan   amend.py        amendments (pure functions)
-      export/          json_io, markdown (+ CSV), intervals_icu
+      export/          json_io (plan files), markdown (+ CSV), intervals_icu
       schemas.py       JSON Schemas (committed copies in schemas/)
-      cli.py           Typer commands
+      serialization.py profile YAML / plan JSON text forms (pure)
+      transport.py     HTTP protocol + fake     http_transport.py  httpx adapter
+      settings.py      environment and .env     files.py        atomic file writes
+      cli.py           Typer commands           launcher.py     script entry point
 
 ## Disclaimer
 

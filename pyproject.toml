@@ -8,13 +8,26 @@ version = "0.1.0"
 description = "Multi-sport (cycling + running) training plan generator with intervals.icu export"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["pydantic>=2.6", "PyYAML>=6.0", "typer>=0.12", "httpx>=0.27"]
+# Core: the planning library only. Adapters come as extras (cli, http, api).
+dependencies = ["pydantic>=2.6", "PyYAML>=6.0"]
 
 [project.scripts]
-endurance-planner = "endurance_planner.cli:app"
+endurance-planner = "endurance_planner.launcher:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.4", "mypy>=1.10", "types-PyYAML", "jsonschema>=4.18", "types-jsonschema"]
+cli = ["typer>=0.12"]
+http = ["httpx>=0.27"]
+api = ["fastapi>=0.110", "uvicorn>=0.29"]
+all = ["endurance-planner[cli,http,api]"]
+dev = [
+    "endurance-planner[cli,http,api]",
+    "pytest>=8",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "types-PyYAML",
+    "jsonschema>=4.18",
+    "types-jsonschema",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/endurance_planner"]
