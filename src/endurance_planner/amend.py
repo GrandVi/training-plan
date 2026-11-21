@@ -86,6 +86,10 @@ class AmendError(ValueError):
     """The amendment cannot be made; the message says why."""
 
 
+class NoSession(AmendError):
+    """There is no session (and no skipped one) on that date."""
+
+
 @dataclass(frozen=True)
 class SessionEdit:
     """What to change in one session (the flags of `plan amend`). Flags combine, except
@@ -473,7 +477,7 @@ def amend_session(
     elif current is None:
         base = next((a for a in active.values() if a.skip and a.date == date), None)
         if base is None:
-            raise AmendError(f"no session on {date}")
+            raise NoSession(f"no session on {date}")
     if date < today:
         raise AmendError(f"{date} is before today ({today}): past days cannot be amended")
     original = base.original if base is not None else current
@@ -678,6 +682,9 @@ def undo_amendment(plan: Plan, profile: Profile, today: dt.date, amendment_id: s
         update={"weeks": _with_sessions(plan, drop, restored), "amendments": log}
     )
     dates = {target.date, target.move_to} | {s.date for s in drop + restored}
+    if target.kind is AmendmentKind.UNAVAILABLE:
+        days = (target.last - target.date).days + 1
+        dates |= {target.date + dt.timedelta(days=offset) for offset in range(days)}
 
     def reason_of(day: dt.date) -> str | None:
         return "undone" if day in dates else None
@@ -701,7 +708,7 @@ def swap_sport(
     pinned so that a replan keeps it)."""
     session = next((s for week in plan.weeks for s in week.sessions if s.date == date), None)
     if session is None:
-        raise AmendError(f"no session on {date}")
+        raise NoSession(f"no session on {date}")
     edit = SessionEdit(sport=Sport.RUN if session.sport is Sport.BIKE else Sport.BIKE)
     return amend_session(plan, profile, today, date, edit, scope=Scope.SESSION, force=force)
 

@@ -59,6 +59,7 @@ All commands read `profile.yaml` in the current directory unless `-p` is given.
 | `plan amendments` | Lists the amendment log; `--undo ID` removes one and replans |
 | `plan retarget` | Recomputes watts / paces / bpm, structure and dates untouched |
 | `plan schema` | Prints the JSON Schema of `plan.json` |
+| `serve` | Runs the HTTP API and the web app on a data directory (`--data-dir`, `--host`, `--port`) |
 | `push` | Upserts workouts to intervals.icu, only those that changed (`--all`, `--dry-run`, `--from/--to`, `--absolute-targets`) |
 | `clear` | Deletes this tool's events from intervals.icu (`--dry-run`, `--all-plans`) |
 
@@ -172,6 +173,69 @@ Amendments live in `plan.json` (`amendments`, and `pinned` / `amendment_id` on s
 replan never touches a pinned session. A fresh `plan generate` starts clean. The plan id does
 not change, so unchanged sessions keep their intervals.icu event and `push` only updates the
 differences.
+
+## HTTP API
+
+`endurance-planner serve --data-dir PATH` (extra `api`) serves a JSON API and the web app on
+`127.0.0.1:8000`. The data directory holds `profile.yaml` (copied there and edited by hand)
+and the plans (`plans/`, written by the server).
+
+    export PLANNER_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+    endurance-planner serve --data-dir ~/planner-data        # PATH defaults to PLANNER_DATA_DIR
+    curl -H "Authorization: Bearer $PLANNER_TOKEN" http://127.0.0.1:8000/plan
+
+| Method and path | What it does |
+|---|---|
+| `GET /health` | `{"status": "ok", "version": ...}`; the only route without a token |
+| `GET /profile/summary` | Resolved thresholds, zone tables, warnings, goals (read-only) |
+| `GET /plan` | Current plan: id, revision, current week, weeks summary, goals, warnings |
+| `GET /plan/weeks/{index}` | One week (1-based): load, phase, sessions with steps and absolute targets |
+| `POST /plan/generate` | New plan from the profile (`expected_revision`, `dry_run`, `start`) |
+| `POST /plan/amend` | Change a session (`date`, `minutes`, `sport`, `activity`, `intent`, `skip`, `move_to`, `scope`, `reason`) |
+| `POST /plan/unavailable` | Unavailable or limited range (`from`, `to`, `minutes` per sport, `activity`, `scope`) |
+| `POST /plan/replan` | Rebuild from today after a profile edit |
+| `GET /plan/amendments` | The amendment log |
+| `POST /plan/amendments/{id}/undo` | Remove an amendment and replan |
+| `POST /plan/push` | Push to intervals.icu (`dry_run` true by default, `from`, `to`, `absolute_targets`) |
+| `GET /openapi.json` | OpenAPI description (token required; there is no Swagger UI, it would load from a CDN) |
+
+Rules:
+- **Token**: every route but `/health` (and the static web app, which holds no data) needs
+  `Authorization: Bearer <PLANNER_TOKEN>`, compared in constant time; missing or wrong: 401.
+  The server refuses to start without a token (at least 16 characters), except with
+  `--insecure-local`, which only works with `--host 127.0.0.1`.
+- **Revisions**: every mutation sends `expected_revision`, the revision it was based on (0
+  when there is no plan). If the plan changed since, the answer is 409 with
+  `current_revision`: reload and redo the change.
+- **Dry runs**: `dry_run: true` returns the changes (with reason codes) and the issues and
+  stores nothing. A change that breaks a rule is refused with 422 `rules_broken` and its
+  issues, unless `force: true`.
+- **Errors** always look like `{"error": {"code": ..., "message": ...}}` with the library's
+  message: 404 `no_plan`, `unknown_week`, `unknown_date`; 409 `revision_conflict`; 422
+  `amend_refused`, `swap_refused`, `planning_error`, `skeleton_changed`, `plan_invalid`,
+  `rules_broken`, `invalid_request`; 502 `intervals_error`; 503 `busy`, `profile_invalid`,
+  `intervals_not_configured`; 500 `internal_error` (details only in the server log). No stack
+  trace and no server path is sent to clients.
+- **Secrets**: `INTERVALS_API_KEY` and `INTERVALS_ATHLETE_ID` are read from the server
+  environment only (not from a `.env` file), are never sent back and never logged.
+- Responses carry `Cache-Control: no-store` (data routes) and security headers
+  (`Content-Security-Policy` with `'self'` only, `X-Content-Type-Options`, `X-Frame-Options`,
+  `Referrer-Policy`).
+
+Sample dry run:
+
+    POST /plan/amend
+    {"expected_revision": 0, "date": "2026-12-08", "minutes": 40, "dry_run": true}
+
+    {"plan_id": "victor-20261116", "revision": 0, "dry_run": true, "applied": true,
+     "refused": false, "changed": true, "message": "amendment a1: 40 min (scope rest)",
+     "amendment": {"id": "a1", "date": "2026-12-08", "minutes": 40, ...},
+     "changes": [{"date": "2026-12-08", "code": "amended",
+                  "before": {"name": "Cruise intervals 3x10 min", "duration_s": 3360, ...},
+                  "after": {"name": "Cruise intervals 3x8 min, shorter reps",
+                            "duration_s": 2400, "pinned": true, ...},
+                  "line": "2026-12-08 amended ..."}, ...],
+     "issues": [{"severity": "warning", "code": "amend_shortened", ...}]}
 
 ## How a plan is built
 
@@ -411,6 +475,12 @@ Services and storage:
   mutation based on another revision raises `RevisionConflict`. The CLI checks against the
   file it has just read. The field is optional: plans without it read as revision 0, and 0 is
   not written, so `schema_version` stays 2 and a freshly generated plan file is unchanged.
+- The API binds to `127.0.0.1` by default; to reach it from other devices, put it behind
+  `tailscale serve` (see "Using it from several devices") rather than binding a public
+  address. `/health` is open so that probes need no secret. Dry runs of `/plan/push` are the
+  default, so a forgotten flag never writes to intervals.icu.
+- Error messages sent to clients never contain server paths (the profile is named
+  `profile.yaml`, the data directory "the data directory").
 - `storage.FileStorage(data_dir)`: `profile.yaml` (hand-edited, never written by the
   services), `plans/<id>.json`, `current` (id of the current plan), `.lock`. Writes go to a
   temporary file that is renamed over the target; leftovers of a crash (`.<name>.tmp`) are
@@ -515,6 +585,7 @@ behaviour shows up as a failing test. Layout:
       transport.py     HTTP protocol + fake     http_transport.py  httpx adapter
       settings.py      environment and .env     files.py        atomic file writes
       services.py      use cases (pure)         storage.py      data directory adapter
+      api.py           FastAPI app (`serve`)
       cli.py           Typer commands           launcher.py     script entry point
 
 ## Disclaimer

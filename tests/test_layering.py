@@ -14,6 +14,7 @@ import pytest
 PACKAGE = Path(__file__).parent.parent / "src" / "endurance_planner"
 # Modules that touch the outside world: files, environment, HTTP, terminal, web server.
 ADAPTERS = {
+    "endurance_planner.api",
     "endurance_planner.cli",
     "endurance_planner.config",
     "endurance_planner.export.json_io",

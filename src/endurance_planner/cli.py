@@ -650,3 +650,38 @@ def clear(
     except IntervalsError as exc:
         raise _fail(str(exc)) from exc
     typer.echo(f"removed {len(events)} event(s)")
+
+
+# ---------------------------------------------------------------------- server
+@app.command()
+def serve(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option("--data-dir", help="Data directory (default: PLANNER_DATA_DIR)."),
+    ] = None,
+    host: Annotated[
+        str, typer.Option(help="Address to listen on (default: this machine only).")
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="Port.")] = 8000,
+    insecure_local: Annotated[
+        bool,
+        typer.Option("--insecure-local", help="Run without a token (only with --host 127.0.0.1)."),
+    ] = False,
+) -> None:
+    """Run the HTTP API and the web app. The token comes from PLANNER_TOKEN, the
+    intervals.icu key from INTERVALS_API_KEY (server environment only)."""
+    env = environment(None)
+    folder = data_dir or (Path(env["PLANNER_DATA_DIR"]) if env.get("PLANNER_DATA_DIR") else None)
+    if folder is None:
+        raise _fail("give --data-dir or set PLANNER_DATA_DIR")
+    try:
+        from endurance_planner import api
+    except ModuleNotFoundError as exc:
+        raise _fail('the server needs the api extra: pip install "endurance-planner[api]"') from exc
+    try:
+        api.check_server_settings(env.get("PLANNER_TOKEN") or None, host, insecure_local)
+    except api.ServerConfigError as exc:
+        raise _fail(str(exc)) from exc
+    if not (folder / "profile.yaml").is_file():
+        raise _fail(f"{folder / 'profile.yaml'} is missing: copy your profile.yaml there")
+    api.serve(folder, host, port, insecure_local)

@@ -81,8 +81,8 @@ class FileStorage:
         try:
             text = self.profile_path.read_text(encoding="utf-8")
         except FileNotFoundError as exc:
-            raise ProfileError(f"no profile.yaml in {self.data_dir}") from exc
-        return parse_profile(text, str(self.profile_path))
+            raise ProfileError("no profile.yaml in the data directory") from exc
+        return parse_profile(text, "profile.yaml")  # messages name no server path
 
     def save_profile(self, profile: Profile, *, overwrite: bool = False) -> None:
         """Write a profile (setup only). A hand-edited profile.yaml is never replaced unless
@@ -108,11 +108,11 @@ class FileStorage:
     def load_plan(self, plan_id: str | None = None) -> Plan:
         plan_id = plan_id or self.current_plan_id()
         if plan_id is None:
-            raise PlanNotFound(f"no plan yet in {self.data_dir}: generate one first")
+            raise PlanNotFound("no plan yet: generate one first")
         try:
             text = self._plan_path(plan_id).read_text(encoding="utf-8")
         except FileNotFoundError as exc:
-            raise PlanNotFound(f"no plan {plan_id!r} in {self.plans_dir}") from exc
+            raise PlanNotFound(f"no plan {plan_id!r}") from exc
         return parse_plan(text)
 
     def save_plan(self, plan: Plan) -> None:
@@ -137,7 +137,7 @@ class FileStorage:
             while not _try_lock(handle):
                 if time.monotonic() >= deadline:
                     raise StorageBusy(
-                        f"{self.data_dir} is locked by another writer; try again in a moment"
+                        "the data directory is locked by another writer; try again in a moment"
                     )
                 time.sleep(LOCK_POLL_S)
             try:
