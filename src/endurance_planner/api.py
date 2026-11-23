@@ -434,6 +434,19 @@ def create_app(
             )
         )
 
+    @app.post("/plan/adapt", response_model=MutationResult, tags=["changes"])
+    def adapt(body: MutationBody, _: Auth) -> MutationResult:
+        """Rebuild the plan from what was done (the stored history): days before today are
+        replaced by the completed activities, the rest is replanned. Nothing is pushed."""
+        return _refused(
+            service.adapt(
+                today(),
+                expected_revision=body.expected_revision,
+                dry_run=body.dry_run,
+                force=body.force,
+            )
+        )
+
     @app.post("/history/sync", response_model=SyncReport, tags=["intervals.icu"])
     def sync_history(body: SyncBody, _: Auth) -> SyncReport:
         """Read completed activities and wellness from intervals.icu into the history

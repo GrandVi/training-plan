@@ -22,7 +22,6 @@ from itertools import combinations, pairwise
 from endurance_planner.load import (
     intensity_split,
     run_impact_multiplier,
-    week_weighted_load,
     weighted_load,
 )
 from endurance_planner.models.enums import (
@@ -57,10 +56,13 @@ from endurance_planner.rules import (
     load_cap,
     longest_recent_s,
     longest_session_cap,
+    ref_duration_s,
+    ref_load,
+    ref_longest_s,
+    ref_run_s,
     reference,
     run_volume_cap,
-    week_longest_s,
-    week_run_s,
+    under_trained,
 )
 from endurance_planner.specificity import GOAL_DISTANCE_KM, GOAL_SPECS, GoalSpec
 from endurance_planner.strength import reserved_s
@@ -366,7 +368,7 @@ class Scheduler:
         assert self.level_s is not None
         target = self.level_s
         # Reductions are relative to what was actually done in the last weeks.
-        done = max((float(week.duration_s) for week in history[-RAMP_WINDOW:]), default=target)
+        done = max((ref_duration_s(week) for week in history[-RAMP_WINDOW:]), default=target)
         if sk.recovery or sk.phase in (Phase.TAPER, Phase.TRANSITION):
             target = min(target, done)
         if sk.recovery:
@@ -403,7 +405,7 @@ class Scheduler:
         factor = self._phase_factor(sk)
         hold = not history or sk.phase is Phase.PEAK  # no volume increase in week 1 and in peak
 
-        loads = [week_weighted_load(week, self.impact) for week in history]
+        loads = [ref_load(week, self.impact) for week in history]
         ref = reference(loads, baseline_load(profile))
         plan_start = sk.start - dt.timedelta(weeks=sk.index - 1)
         back = break_return(profile.availability, sk.start, plan_start)
@@ -412,6 +414,10 @@ class Scheduler:
         elif sk.recovery and back is not None and back.week == 1:
             # The break was the recovery: compare with the loading weeks before it.
             load = min(limits.recovery_week_factor + 0.05, RECOVERY_MAX_RATIO) * ref
+        elif sk.recovery and under_trained(history[-1], self.impact):
+            # The week before was done well below plan: compare with the weeks before it.
+            before = reference(loads[:-1], baseline_load(profile))
+            load = min(limits.recovery_week_factor + 0.05, RECOVERY_MAX_RATIO) * before
         elif sk.recovery:
             load = (limits.recovery_week_factor + 0.05) * loads[-1]
         elif factor is not None:
@@ -419,6 +425,9 @@ class Scheduler:
         else:
             load = max(ref * (1 + self.ramp), ref + LOAD_STEP_TSS)
         load = min(load, load_cap(loads, profile))
+        if history and under_trained(history[-1], self.impact):
+            # No catch-up after a week done well below plan: no more than the reference before.
+            load = min(load, reference(loads[:-1], baseline_load(profile)))
         if back is not None:
             load = min(load, back.cap * ref)
             self._warn(
@@ -428,7 +437,7 @@ class Scheduler:
                 sk.index,
             )
 
-        run_history = [float(week_run_s(week)) for week in history]
+        run_history = [ref_run_s(week) for week in history]
         run_ref = reference(run_history, current_run_s(profile))
         run_hard = run_volume_cap(run_history, profile)
         if Sport.RUN not in self.enabled:
@@ -447,7 +456,7 @@ class Scheduler:
         longest: dict[Sport, float] = {}
         long_target: dict[Sport, float] = {}
         for sport in Sport:
-            history_s = [float(week_longest_s(week, sport)) for week in history]
+            history_s = [ref_longest_s(week, sport) for week in history]
             longest[sport] = longest_session_cap(history_s, sport, profile)
             long_ref = reference(history_s, longest_recent_s(profile, sport)) or LONG_START_S[sport]
             if factor is not None:

@@ -579,6 +579,47 @@ def plan_review(
         raise _fail(str(exc)) from exc
 
 
+@plan_app.command("adapt")
+def plan_adapt(
+    plan: PlanArgument,
+    history: HistoryOption = Path("history.json"),
+    profile: ProfileOption = Path("profile.yaml"),
+    dry_run: DryRunOption = False,
+    force: ForceOption = False,
+    out: InPlaceOption = None,
+    athlete_id: AthleteOption = None,
+    verbose: VerboseOption = False,
+    today: TodayOption = None,
+) -> None:
+    """Rebuild the plan from what was done (history.json, written by `sync`): days before
+    today become the completed activities, the current week and the later weeks are
+    rebuilt. Nothing is pushed; run `push` afterwards."""
+    loaded, athlete, done = _plan(plan), _profile(profile), _history(history)
+    events = []
+    if athlete.preferences.adaptation.read_calendar_events:
+        try:
+            events = services.calendar_events(
+                make_client(athlete_id, verbose), loaded, _date(today)
+            )
+        except IntervalsError as exc:
+            raise _fail(str(exc)) from exc
+    try:
+        outcome = services.adapt_plan(
+            loaded,
+            athlete,
+            done,
+            _date(today),
+            expected_revision=loaded.revision,
+            dry_run=dry_run,
+            force=force,
+            events=events,
+        )
+    except PlanningError as exc:
+        raise _fail(str(exc)) from exc
+    typer.echo(outcome.result.message, err=True)
+    _changes(outcome, plan, out)
+
+
 @plan_app.command("amendments")
 def plan_amendments(
     plan: PlanArgument,

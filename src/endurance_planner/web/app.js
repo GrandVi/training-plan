@@ -329,6 +329,7 @@ async function showWeek(index) {
     const badges = [];
     if (session.hard) badges.push(h("span", { class: "badge hard", text: "key" }));
     if (session.pinned) badges.push(h("span", { class: "badge pinned", text: "changed" }));
+    if (session.source === "actual") badges.push(h("span", { class: "badge done", text: "done" }));
     if (session.indoor) badges.push(h("span", { class: "badge", text: "indoor" }));
     if (session.activity_type === "MountainBikeRide") badges.push(h("span", { class: "badge", text: "MTB" }));
     return h(
@@ -523,7 +524,7 @@ async function showSession(date) {
     h(
       "div",
       { class: "actions" },
-      h("a", { class: "button", href: `#/change/${session.date}`, text: "Change this session" }),
+      session.source === "actual" ? null : h("a", { class: "button", href: `#/change/${session.date}`, text: "Change this session" }),
       h("a", { class: "button secondary", href: `#/week/${number}`, text: "Back to the week" }),
     ),
   );
@@ -777,13 +778,22 @@ async function showReview(synced = null) {
       sync.disabled = false;
     }
   });
+  const adaptSlot = h("div", {});
+  const adapt = h("button", {
+    type: "button",
+    class: "secondary",
+    text: "Adapt the plan to what was done",
+    disabled: !review.synced,
+    on: { click: () => preview(adaptSlot, "/plan/adapt", {}, () => go("#/review")) },
+  });
   const weeks = [...review.weeks].reverse();
   render(
     "Planned vs done",
     "review",
     h("p", { class: "muted", text: review.synced ? `Last sync: ${formatDay(review.synced)}.` : "No activity read yet: sync from intervals.icu first." }),
-    h("div", { class: "actions" }, sync),
+    h("div", { class: "actions" }, sync, adapt),
     result,
+    adaptSlot,
     weeks.length ? h("ul", { class: "review" }, weeks.map(reviewCard)) : h("p", { class: "muted", text: "The plan has not started yet." }),
     review.outside ? h("p", { class: "muted", text: `${review.outside} activities fall outside the plan's weeks.` }) : null,
   );

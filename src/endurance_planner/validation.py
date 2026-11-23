@@ -31,12 +31,18 @@ from endurance_planner.rules import (
     INTENSITY_TOLERANCE_WEEK,
     RECOVERY_MAX_RATIO,
     TAPER_MAX_RATIO,
+    UNDER_TRAINING_SHARE,
     baseline_load,
     break_return,
     load_cap,
     longest_session_cap,
+    ref_duration_s,
+    ref_load,
+    ref_longest_s,
+    ref_run_s,
     reference,
     run_volume_cap,
+    under_trained,
     week_longest_s,
     week_run_s,
 )
@@ -99,12 +105,20 @@ def _check_structure(plan: Plan, today: dt.date) -> Iterator[Issue]:
             yield _error(
                 "weeks_not_contiguous", f"week {week.start} does not follow the previous one", week
             )
-        dates = [session.date for session in week.sessions]
+        # Completed activities (plan adapt) are facts: only their week is checked.
+        dates = [session.date for session in week.sessions if not session.actual]
         if len(set(dates)) != len(dates):
             yield _error("two_sessions_same_day", "more than one session on the same day", week)
+        actual_dates = {session.date for session in week.sessions if session.actual}
+        if actual_dates & set(dates):
+            yield _error(
+                "two_sessions_same_day", "a session is planned on a day already done", week
+            )
         for session in week.sessions:
             if not week.start <= session.date < week.start + dt.timedelta(weeks=1):
                 yield _error("session_outside_week", f"{session.date} is outside its week", week)
+            if session.actual:
+                continue
             if session.date < today:
                 yield _error(
                     "session_in_past", f"{session.date} {session.name} is in the past", week
@@ -121,7 +135,7 @@ def _check_structure(plan: Plan, today: dt.date) -> Iterator[Issue]:
         for strength in week.strength:
             if not week.start <= strength.date < week.start + dt.timedelta(weeks=1):
                 yield _error("session_outside_week", f"{strength.date} is outside its week", week)
-            if strength.date < today:
+            if strength.date < today and not strength.actual:
                 yield _error(
                     "session_in_past", f"{strength.date} {strength.name} is in the past", week
                 )
@@ -131,6 +145,11 @@ def _check_availability(plan: Plan, profile: Profile) -> Iterator[Issue]:
     availability = profile.availability
     budget_s = availability.weekly_hours_budget * 3600
     for week in plan.weeks:
+        if week.has_actual:  # partly done: its remaining days are planned within the rules
+            for session in week.sessions:
+                if not session.actual:
+                    yield from _check_day(session, profile, week)
+            continue
         planned_s = week.duration_s + week.strength_minutes * 60  # strength counts too
         if planned_s > budget_s + 1:
             yield _error(
@@ -200,9 +219,26 @@ def _check_progression(plan: Plan, profile: Profile, impact: float) -> Iterator[
     loads: list[float] = []
     runs: list[float] = []
     longest: dict[Sport, list[float]] = {sport: [] for sport in Sport}
+    previous: Week | None = None
     for week in plan.weeks:
         load = week_weighted_load(week, impact)
         cap = load_cap(loads, profile)
+        if previous is not None and under_trained(previous, impact) and not week.has_actual:
+            before = reference(loads[:-1], baseline_load(profile))
+            if load > before + LOAD_TOLERANCE_TSS:
+                yield _error(
+                    "under_training_catch_up",
+                    f"load {load:.0f} after a week done under {UNDER_TRAINING_SHARE:.0%} of "
+                    f"plan; no catch-up: at most the reference before it ({before:.0f})",
+                    week,
+                )
+        if week.has_actual:  # completed activities are facts: only used as references
+            loads.append(ref_load(week, impact))
+            runs.append(ref_run_s(week))
+            for sport in Sport:
+                longest[sport].append(ref_longest_s(week, sport))
+            previous = week
+            continue
         if load > cap + LOAD_TOLERANCE_TSS:
             yield _error(
                 "ramp_rate",
@@ -231,6 +267,7 @@ def _check_progression(plan: Plan, profile: Profile, impact: float) -> Iterator[
             longest[sport].append(longest_s)
         loads.append(load)
         runs.append(run_s)
+        previous = week
 
 
 def _check_return_from_break(plan: Plan, profile: Profile, impact: float) -> Iterator[Issue]:
@@ -241,7 +278,7 @@ def _check_return_from_break(plan: Plan, profile: Profile, impact: float) -> Ite
     for week in plan.weeks:
         load = week_weighted_load(week, impact)
         back = break_return(profile.availability, week.start, plan.weeks[0].start)
-        if back is not None:
+        if back is not None and not week.has_actual:
             cap = back.cap * reference(loads, baseline_load(profile))
             if load > cap + LOAD_TOLERANCE_TSS:
                 yield _error(
@@ -250,7 +287,7 @@ def _check_return_from_break(plan: Plan, profile: Profile, impact: float) -> Ite
                     f"{load:.0f} is above {back.cap:.0%} of the reference ({cap:.0f})",
                     week,
                 )
-        loads.append(load)
+        loads.append(ref_load(week, impact))
 
 
 def _check_recovery_and_taper(plan: Plan, profile: Profile, impact: float) -> Iterator[Issue]:
@@ -270,14 +307,18 @@ def _check_recovery_and_taper(plan: Plan, profile: Profile, impact: float) -> It
                 week,
             )
         load = week_weighted_load(week, impact)
-        if week.recovery and previous is not None:
-            before = week_weighted_load(previous, impact)
+        if week.recovery and previous is not None and not week.has_actual:
+            before = ref_load(previous, impact)
             what = "the previous week"
             back = break_return(profile.availability, week.start, plan.weeks[0].start)
             if back is not None and back.week == 1:
                 # First week back after a break: compare with the weeks before the break.
                 before = reference(loads, baseline_load(profile))
                 what = "the weeks before the break"
+            elif under_trained(previous, impact):
+                # The week before was done well below plan: compare with the weeks before it.
+                before = reference(loads[:-1], baseline_load(profile))
+                what = "the weeks before the under-trained week"
             if load > RECOVERY_MAX_RATIO * before + LOAD_TOLERANCE_TSS:
                 yield _error(
                     "recovery_week_too_hard",
@@ -285,7 +326,7 @@ def _check_recovery_and_taper(plan: Plan, profile: Profile, impact: float) -> It
                     f"{what} ({before:.0f})",
                     week,
                 )
-        loads.append(load)
+        loads.append(ref_load(week, impact))
 
     if not plan.weeks:
         return
@@ -304,8 +345,10 @@ def _check_recovery_and_taper(plan: Plan, profile: Profile, impact: float) -> It
         if week.phase is not Phase.TAPER:
             yield _error("missing_taper", f"no taper before '{goal.name}' ({goal.date})", week)
             continue
-        before_s = max((w.duration_s for w in plan.weeks[max(0, index - 4) : index]), default=0)
-        if before_s and week.duration_s > TAPER_MAX_RATIO * before_s:
+        before_s = max(
+            (ref_duration_s(w) for w in plan.weeks[max(0, index - 4) : index]), default=0.0
+        )
+        if before_s and not week.has_actual and week.duration_s > TAPER_MAX_RATIO * before_s:
             yield _error(
                 "taper_volume",
                 f"race week of '{goal.name}' has {week.duration_s / 3600:.1f} h, more than "
@@ -322,6 +365,8 @@ def _check_hard_sessions(plan: Plan, profile: Profile) -> Iterator[Issue]:
     impact_runs: list[Session] = []
     for week in plan.weeks:
         week_hard = [session for session in week.sessions if session.intent.hard]
+        if week.has_actual:
+            week_hard = []  # what was done is not limited; spacing with it still applies
         if len(week_hard) > max_hard:
             yield _error(
                 "too_many_hard_sessions", f"{len(week_hard)} hard sessions, max {max_hard}", week
@@ -337,7 +382,7 @@ def _check_hard_sessions(plan: Plan, profile: Profile) -> Iterator[Issue]:
             if session.sport is Sport.RUN and (session.intent.hard or session.slot in LONG_SLOTS):
                 impact_runs.append(session)
     for a, b in pairwise(hard):
-        if (b.date - a.date).days >= HARD_MIN_GAP_DAYS:
+        if (b.date - a.date).days >= HARD_MIN_GAP_DAYS or (a.actual and b.actual):
             continue
         message = (
             f"hard sessions on {a.date} ({a.sport}) and {b.date} ({b.sport}) "
@@ -349,7 +394,7 @@ def _check_hard_sessions(plan: Plan, profile: Profile) -> Iterator[Issue]:
             yield _warning("hard_session_spacing", message, week_of[b.date])
     for a, b in pairwise(impact_runs):
         back_to_back = a.slot in LONG_SLOTS and b.slot in LONG_SLOTS
-        if (b.date - a.date).days <= 1 and not back_to_back:
+        if (b.date - a.date).days <= 1 and not back_to_back and not (a.actual and b.actual):
             yield _error(
                 "consecutive_high_impact_runs",
                 f"hard or long runs on consecutive days ({a.date}, {b.date})",
@@ -364,6 +409,8 @@ def _check_intensity(plan: Plan, profile: Profile, zones: ZoneSet) -> Iterator[I
     block_low = block_high = 0
     block: list[Week] = []
     for week in plan.weeks:
+        if week.has_actual:  # what was done is reviewed (plan review), not checked
+            continue
         splits = [intensity_split(session, zones) for session in week.sessions]
         low = sum(split[0] for split in splits)
         high = sum(split[1] for split in splits)
@@ -418,7 +465,8 @@ def _check_ladders(plan: Plan) -> Iterator[Issue]:
             rung = progress_rung(session)
             if session.template_id is None or rung is None:
                 continue
-            if rung > done.get(session.template_id, 0):
+            # A completed activity is a fact: the rung it did counts, even after missed ones.
+            if rung > done.get(session.template_id, 0) and not session.actual:
                 yield _error(
                     "ladder_progression",
                     f"{session.date} {session.name}: rung {rung + 1} of '{session.template_id}' "
@@ -507,7 +555,12 @@ def _check_strength(plan: Plan, profile: Profile) -> Iterator[Issue]:
     previous: StrengthSession | None = None
     for week in plan.weeks:
         days = len(training_days(week, explicit=False))
-        if not settings.allow_extra_days and days > profile.availability.days_per_week:
+        partly_done = week.has_actual or any(s.actual for s in week.strength)
+        if (
+            not settings.allow_extra_days
+            and days > profile.availability.days_per_week
+            and not partly_done
+        ):
             yield _error(
                 "strength_placement",
                 f"{days} training days with strength, limit is "
@@ -516,7 +569,7 @@ def _check_strength(plan: Plan, profile: Profile) -> Iterator[Issue]:
                 week,
             )
         allowed = weekly_count(week.phase, settings)
-        if len(week.strength) > allowed:
+        if len(week.strength) > allowed and not partly_done:
             yield _error(
                 "strength_count",
                 f"{len(week.strength)} strength sessions, {week.phase} weeks allow {allowed} "
@@ -524,6 +577,9 @@ def _check_strength(plan: Plan, profile: Profile) -> Iterator[Issue]:
                 week,
             )
         for session in sorted(week.strength, key=lambda s: s.date):
+            if session.actual:
+                previous = session
+                continue
             label = f"{session.date} {session.name}"
             explicit = session.amendment_id is not None
             for problem in day_problems(session.date, endurance, profile, plan.goals, explicit):
@@ -609,6 +665,8 @@ def _check_strength_phase(session: StrengthSession, week: Week) -> Iterator[Issu
 def _check_targets(plan: Plan) -> Iterator[Issue]:
     for week in plan.weeks:
         for session in week.sessions:
+            if session.actual:
+                continue
             for step in session.flat_steps():
                 resolved = step.resolved
                 ok = resolved is not None and (

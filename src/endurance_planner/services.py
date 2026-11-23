@@ -22,6 +22,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from endurance_planner import adapt as adapt_lib
 from endurance_planner import amend as amend_lib
 from endurance_planner import history as history_lib
 from endurance_planner import planner, validation
@@ -121,6 +122,7 @@ class SessionView(BaseModel):
     technical: bool
     pinned: bool
     amendment_id: str | None
+    source: str | None = None  # "actual": a completed activity (plan adapt)
 
     @classmethod
     def of(cls, session: Session) -> "SessionView":
@@ -139,6 +141,7 @@ class SessionView(BaseModel):
             technical=session.technical,
             pinned=session.pinned,
             amendment_id=session.amendment_id,
+            source=session.source,
         )
 
 
@@ -156,6 +159,7 @@ class StrengthView(BaseModel):
     equipment: list[str]
     pinned: bool
     amendment_id: str | None
+    source: str | None = None
 
     @classmethod
     def of(cls, session: StrengthSession) -> "StrengthView":
@@ -171,6 +175,7 @@ class StrengthView(BaseModel):
             equipment=[item.value for item in session.equipment_used],
             pinned=session.pinned,
             amendment_id=session.amendment_id,
+            source=session.source,
         )
 
 
@@ -934,6 +939,45 @@ def replan(
     )
 
 
+def adapt_plan(
+    plan: Plan,
+    profile: Profile,
+    history: History,
+    today: dt.date,
+    *,
+    expected_revision: int | None,
+    dry_run: bool = False,
+    force: bool = False,
+    events: Sequence[adapt_lib.CalendarEvent] = (),
+) -> Outcome:
+    """Rebuild the plan from what was done before today (adapt.adapt_plan). Nothing is
+    pushed. `events`: calendar events read as days off (only used when
+    preferences.adaptation.read_calendar_events is on)."""
+    check_revision(plan, expected_revision)
+    result = adapt_lib.adapt_plan(plan, profile, history, today, events=events)
+    done = sum(1 for week in result.plan.weeks for session in week.sessions if session.actual)
+    message = f"adapted to {done} completed session(s) before {today}"
+    if result.eased is not None:
+        message += f"; next key session eased (amendment {result.eased})"
+    return _finish(
+        plan,
+        result.plan,
+        changes=result.changes,
+        issues=result.issues,
+        dry_run=dry_run,
+        force=force,
+        message=message,
+    )
+
+
+def calendar_events(
+    client: intervals_icu.IntervalsClient, plan: Plan, today: dt.date
+) -> list[adapt_lib.CalendarEvent]:
+    """Days-off events (SICK, INJURED, HOLIDAY; UNVERIFIED) of the plan's weeks."""
+    end = plan.weeks[-1].start + dt.timedelta(days=6)
+    return adapt_lib.calendar_events(client.list_events(plan.weeks[0].start, end))
+
+
 def undo_amendment(
     plan: Plan,
     profile: Profile,
@@ -1235,6 +1279,40 @@ class PlannerService:
                 force=force,
             )
         )
+
+    def adapt(
+        self,
+        today: dt.date,
+        *,
+        expected_revision: int | None,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> MutationResult:
+        """plan adapt on the stored history. With read_calendar_events on and intervals.icu
+        configured, the calendar is read first."""
+        with self.storage.lock():
+            plan, profile = self.storage.load_plan(), self.storage.load_profile()
+            check_revision(plan, expected_revision)
+            events: list[adapt_lib.CalendarEvent] = []
+            if profile.preferences.adaptation.read_calendar_events and self.client_factory:
+                client = self.client_factory()
+                try:
+                    events = calendar_events(client, plan, today)
+                finally:
+                    client.close()
+            outcome = adapt_plan(
+                plan,
+                profile,
+                self.storage.load_history(),
+                today,
+                expected_revision=expected_revision,
+                dry_run=dry_run,
+                force=force,
+                events=events,
+            )
+            if outcome.stored is not None:
+                self.storage.save_plan(outcome.stored)
+            return outcome.result
 
     def undo(
         self,

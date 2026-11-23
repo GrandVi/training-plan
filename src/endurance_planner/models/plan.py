@@ -148,6 +148,12 @@ class Session(BaseModel):
     rung: int | None = Field(None, ge=0)
     pinned: bool = False  # set by an amendment: a replan keeps the session as it is
     amendment_id: str | None = None  # amendment that produced this session
+    # F8. "actual": what was done (plan adapt), not a planned session; not written if unset.
+    source: str | None = Field(None, exclude_if=_unset)
+
+    @property
+    def actual(self) -> bool:
+        return self.source == "actual"
 
     def flat_steps(self) -> Iterator[Step]:
         return flatten(self.steps)
@@ -199,6 +205,11 @@ class StrengthSession(BaseModel):
     rung: int | None = Field(None, ge=0)  # ladder level it completes (None: does not count)
     pinned: bool = False
     amendment_id: str | None = None
+    source: str | None = Field(None, exclude_if=_unset)  # "actual": done (plan adapt)
+
+    @property
+    def actual(self) -> bool:
+        return self.source == "actual"
 
 
 class Week(BaseModel):
@@ -211,6 +222,19 @@ class Week(BaseModel):
     sessions: list[Session] = Field(default_factory=list)
     # Strength sessions (F10). Not written while empty: plans without strength are unchanged.
     strength: list[StrengthSession] = Field(default_factory=list, exclude_if=_empty)
+    # F8. Planned sessions of the days replaced by what was done (plan adapt): the rules
+    # compare the actual week with them (overreach guard, under-training). Not written empty.
+    planned_sessions: list[Session] = Field(default_factory=list, exclude_if=_empty)
+    planned_strength: list[StrengthSession] = Field(default_factory=list, exclude_if=_empty)
+
+    @property
+    def has_actual(self) -> bool:
+        """Part of the week is what was done, not a plan (see plan adapt)."""
+        return (
+            bool(self.planned_sessions)
+            or bool(self.planned_strength)
+            or any(s.actual for s in self.sessions)
+        )
 
     @property
     def strength_minutes(self) -> int:
@@ -316,6 +340,9 @@ class Plan(BaseModel):
     # change based on an older revision is refused (services.RevisionConflict). Files without
     # it read as 0, and 0 is not written, so a freshly generated plan file is unchanged.
     revision: int = Field(0, ge=0, exclude_if=_zero)
+    # F8. Days off found by plan adapt (7+ days without any activity, calendar events); like
+    # the plan's unavailable ranges, they count as calendar exceptions. Not written if empty.
+    days_off: list[CalendarException] = Field(default_factory=list, exclude_if=_empty)
 
     @model_validator(mode="before")
     @classmethod
@@ -326,9 +353,13 @@ class Plan(BaseModel):
         return [a for a in self.amendments if a.active and (kind is None or a.kind is kind)]
 
     def effective_profile(self, profile: Profile) -> Profile:
-        """The profile with this plan's unavailable amendments added to its calendar
-        exceptions (they come last, so they win where they overlap a profile exception)."""
-        extra = [a.as_exception() for a in self.active_amendments(AmendmentKind.UNAVAILABLE)]
+        """The profile with this plan's days off (plan adapt) and unavailable amendments added
+        to its calendar exceptions (they come last, so they win where they overlap a profile
+        exception)."""
+        extra = [
+            *self.days_off,
+            *(a.as_exception() for a in self.active_amendments(AmendmentKind.UNAVAILABLE)),
+        ]
         if not extra:
             return profile
         exceptions = [*profile.availability.exceptions, *extra]

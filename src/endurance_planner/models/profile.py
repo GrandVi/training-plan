@@ -424,12 +424,23 @@ class Limits(_Strict):
     injury_run_impact_bonus: float = Field(0.15, ge=0, le=1.0)
 
 
+class Adaptation(_Strict):
+    """Optional inputs of `plan adapt` (F8), off by default."""
+
+    # Readiness gating: two low-readiness days (HRV or TSB) ease the next key session.
+    use_wellness: bool = False
+    # Read SICK, INJURED and HOLIDAY calendar events from intervals.icu as days off
+    # (UNVERIFIED category names; other categories are ignored).
+    read_calendar_events: bool = False
+
+
 class Preferences(_Strict):
     primary_sport: Sport = Sport.BIKE
     intensity_ratio: IntensityRatio = Field(default_factory=IntensityRatio)
     mesocycle_pattern: Literal["3:1", "2:1"] = "3:1"
     max_hard_sessions_per_week: int = Field(2, ge=1, le=3)
     limits: Limits = Field(default_factory=Limits)
+    adaptation: Adaptation = Field(default_factory=Adaptation)
 
 
 class Profile(_Strict):

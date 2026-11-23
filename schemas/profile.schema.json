@@ -2,6 +2,24 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/GrandVi/training-plan/main/schemas/profile.schema.json",
   "$defs": {
+    "Adaptation": {
+      "additionalProperties": false,
+      "description": "Optional inputs of `plan adapt` (F8), off by default.",
+      "properties": {
+        "use_wellness": {
+          "default": false,
+          "title": "Use Wellness",
+          "type": "boolean"
+        },
+        "read_calendar_events": {
+          "default": false,
+          "title": "Read Calendar Events",
+          "type": "boolean"
+        }
+      },
+      "title": "Adaptation",
+      "type": "object"
+    },
     "Athlete": {
       "additionalProperties": false,
       "properties": {
@@ -553,6 +571,9 @@
         },
         "limits": {
           "$ref": "#/$defs/Limits"
+        },
+        "adaptation": {
+          "$ref": "#/$defs/Adaptation"
         }
       },
       "title": "Preferences",

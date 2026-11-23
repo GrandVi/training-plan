@@ -107,3 +107,6 @@ preferences:
     recovery_week_factor: 0.65        # recovery week load vs previous week
     run_impact_multiplier: 1.25       # run TSS weight for ramp/fatigue limits only
     injury_run_impact_bonus: 0.15     # added to the multiplier when injury_notes is non-empty
+  adaptation:                   # plan adapt (both off by default)
+    use_wellness: false         # ease the next key session after 2 low-readiness days (HRV/TSB)
+    read_calendar_events: false # SICK, INJURED, HOLIDAY intervals.icu events as days off

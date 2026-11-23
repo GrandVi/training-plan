@@ -274,6 +274,34 @@ Sample (`plan review` on the recorded test fixtures, today 2026-11-26):
     | 1 | 2026-11-16 | base | 6.3 / 7.0 | 306 / 348 | 4.5 / 4.2 | 1.8 / 1.9 | 0 / 25 | 1/1 | 0 | 1 / 1 | 86 | Swim x1 |
     | 2 | 2026-11-23 | base | 6.7 / 2.2 | 339 / 106 | 4.5 / 0.8 | 2.2 / 0.4 | 0 / 0 | 0/1 | 0 | 1 / 1 | - | Yoga x1 |
 
+## Adapting the plan to what was done: `plan adapt`
+
+    endurance-planner sync
+    endurance-planner plan adapt plan.json --history history.json --dry-run
+    endurance-planner plan adapt plan.json --history history.json -o plan.adapted.json
+
+Days before today become what was done; the current week is rebuilt for its remaining days
+and every later week from that history. Pinned sessions (amendments) are kept, unchanged
+future sessions keep their intervals.icu event, and nothing is pushed: run `push` afterwards.
+Adapting twice with the same history and day gives the same plan.
+
+| Rule (numbers in `rules.py`) | What happens |
+|---|---|
+| Completed activities | Each day and sport becomes one synthetic session (`source: "actual"`, one steady step whose IF comes from the activity's TSS and duration). It takes the slot of the session planned that day; the planned sessions it replaces stay in `Week.planned_sessions`. Done days are facts: they are not checked as a plan, only used as history. |
+| Key sessions | Done at 80% of the planned time or more (same day, same sport), the rung is completed and the ladder advances; shorter or missed, the rung is held. A missed key session may go to a later free day of its week if the 48 h spacing and the long-session rule allow it (`missed_key_moved`), else it is dropped; never stacked, never moved to another week. |
+| No catch-up | What a week did not do is not added to its remaining days. |
+| Overreach guard | Ramp references (load, run volume, longest session, volume) use min(actual, planned x 1.10): one oversized week cannot raise every later cap. |
+| Under-training | After a week done below 70% of its planned load, the next week's load is capped at the reference before that week (a recovery week is compared with it too). |
+| Return from break | 7 days or more without any activity are days off (`Plan.days_off`), so the return-from-break caps of calendar exceptions apply. |
+| Strength | A planned strength session counts as done when a WeightTraining activity is on its day; otherwise it is removed and its ladder holds. |
+| Readiness (opt-in) | With `preferences.adaptation.use_wellness`, two consecutive low-readiness days (HRV below 90% of its mean over the previous 28 days, with 7 values at least, or TSB = CTL - ATL below -25) ease the next key session one rung (or to endurance at the first rung), as an amendment with the reason "low readiness". Never harder. A training-load heuristic, not health advice. |
+| Calendar events (opt-in) | With `preferences.adaptation.read_calendar_events`, SICK, INJURED and HOLIDAY events of the intervals.icu calendar are days off; other categories are ignored. |
+
+Reason codes: `actual` (past day replaced by what was done), `missed_key`, `missed_key_moved`,
+`adapted` (rest of the current week), `readiness`, `calendar_event`, `rebalanced` (later weeks).
+Notes explain what adapt saw: `adapt_gap`, `adapt_overreach`, `adapt_under_training`,
+`adapt_missed_key`, `adapt_readiness`, `adapt_calendar_event`, `adapt_history_stale`.
+
 ## Using it from several devices
 
 The planner runs on one machine (a Raspberry Pi at home) and is used from a laptop and an
@@ -403,6 +431,7 @@ and the plans (`plans/`, written by the server).
 | `POST /plan/replan` | Rebuild from today after a profile edit |
 | `GET /plan/amendments` | The amendment log |
 | `POST /plan/amendments/{id}/undo` | Remove an amendment and replan |
+| `POST /plan/adapt` | Rebuild the plan from the stored history (`expected_revision`, `dry_run`, `force`) |
 | `POST /history/sync` | Read completed activities and wellness into the history (`since`, `dry_run`) |
 | `GET /plan/review` | Planned vs actual per week (`week` or `since` query parameters) |
 | `POST /plan/push` | Push to intervals.icu (`dry_run` true by default, `from`, `to`, `absolute_targets`) |
@@ -475,8 +504,9 @@ Sample dry run (example profile, abbreviated):
   Confirm (or "Apply anyway" after ticking a box, when a rule is broken). Follow-on changes
   of later weeks are folded under one line.
 - **Review**: planned vs done, latest week first (hours, TSS, ride / run / strength / other,
-  key sessions with their status, hard sessions, share of easy time), and "Sync from
-  intervals.icu".
+  key sessions with their status, hard sessions, share of easy time), "Sync from
+  intervals.icu" and "Adapt the plan to what was done" (preview first). Done sessions carry a
+  "done" badge in the week view.
 - **Time off**: a date range with no training or limited minutes per sport, preview first.
 - **Push**: preview of the workouts to send (nothing is sent), then "Send to intervals.icu".
 - **Changes**: the amendment log, with Undo (preview first) on active amendments.
@@ -615,8 +645,10 @@ Zwift / FIT files are not generated here: intervals.icu can export them from the
 
 ## Limits
 
-- `sync` and `plan review` read what you actually did; `plan replan` still takes the sessions
-  dated before today as done (adapting the plan from the history is `plan adapt`).
+- `sync` and `plan review` read what you actually did and `plan adapt` rebuilds the plan from
+  it; `plan replan` alone still takes the sessions dated before today as done.
+- `plan adapt` reads a history that starts at the plan start: days without any activity count
+  as not trained (sync from the plan start first).
 - Key sessions are matched by date and sport only: a key run done the next day, or on the
   bike, counts as missed.
 - After an amendment, later weeks are rebuilt from the real (lower) history: their caps can
@@ -750,6 +782,25 @@ Activity history and review (F7):
   for the API. It has no revision: a sync is an idempotent merge done under the storage lock.
 - The review covers the weeks that have started (`--week` and `--since` select others); a
   key session dated today or later without an activity is "upcoming", not missed.
+
+Plan adapt (F8):
+- Activities dated today are not used yet (the day is not over); the history should cover the
+  plan from its start (`adapt_history_stale` when the last sync is older than yesterday).
+- Several activities of the same day and sport make one synthetic session; activities of
+  other types (swim, yoga) are reviewed but are not sessions and do not enter the ramp caps.
+- A synthetic session is "hard" when it matches a planned key session or its IF is 0.85 or
+  more; its IF is kept between 0.30 and 1.50.
+- In a week with done days, the weekly totals (budget, training days, run frequency, hard
+  sessions, intensity share, ramp caps of that week) are not checked: part of it is a fact.
+  Its remaining days are planned within the remaining budget, and the 48 h spacing with done
+  hard sessions is still checked.
+- The current week keeps its original sessions when every day done matches the plan (same
+  slot and key session, 80% to 110% of the planned time); otherwise it is rebuilt.
+- A completed key session completes the rung it was planned at, even after missed rungs.
+- The readiness downgrade is an amendment (it shows in `plan amendments` and can be undone);
+  one is enough while it is in the future, so adapting again does not ease another session.
+- UNVERIFIED: the calendar categories `SICK`, `INJURED`, `HOLIDAY` (read with
+  `start_date_local` and `end_date_local`); wellness names listed under F7.
 
 Tooling:
 - `mypy` checks against the running interpreter (no pinned `python_version`); `ruff` targets 3.11.
@@ -902,8 +953,10 @@ Changing a plan in progress:
   `amend.undo_amendment`, `replan.replan`, `swap.swap_session`, `planner.retarget_plan`,
   `validation.validate_plan` and the `export` functions directly; the plan is a pydantic model
   (`Plan > Week > Session > Step | Repeat`) with a stable JSON form.
-- **Adaptation from completed activities**: see `adapt.py`; `replan.replan(..., history=weeks)`
-  already rebuilds the remaining weeks from weeks actually done.
+- **Adaptation rules**: numbers in `rules.py` (`OVERREACH_FACTOR`, `UNDER_TRAINING_SHARE`,
+  `READINESS_*`, `CALENDAR_OFF_CATEGORIES`); the guarded references (`ref_load`, `ref_run_s`,
+  `ref_longest_s`, `ref_duration_s`) are shared by the scheduler and `validation.py`;
+  `adapt.adapt_plan` builds the history and calls `replan.replan_plan`.
 
 ## Development
 
@@ -922,7 +975,7 @@ strength feature, so a change of behaviour shows up as a failing test. Layout:
       load.py          TSS, low/high split, CTL/ATL/TSB
       rules.py         numeric caps shared by scheduler and validator
       periodization.py templates.py specificity.py scheduler.py planner.py
-      swap.py          validation.py            adapt.py (future hook)
+      swap.py          validation.py            adapt.py        plan adapt
       strength.py      exercise library, strength ladders, placement of strength sessions
       history.py       activities and wellness from intervals.icu (parse, merge)
       review.py        planned vs actual per week (Markdown, CSV)

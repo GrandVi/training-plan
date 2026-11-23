@@ -160,6 +160,16 @@ def week_exceptions(week: Week, profile: Profile) -> list[CalendarException]:
 
 
 def _session_block(session: Session) -> list[str]:
+    if session.actual:
+        return [
+            f"#### {session.date:%a %d %b} - done: {session.name}",
+            "",
+            f"{format_duration(session.duration_s)}, {session.tss:.0f} TSS "
+            f"({session.sport.value}, {session.slot.value}"
+            f"{', key ' + str(session.template_id) if session.template_id else ''}"
+            f"{'' if session.rung is not None or not session.template_id else ', rung held'})",
+            "",
+        ]
     tags = [session.slot.value, session.intent.value]
     if session.indoor:
         tags.append("indoor")
@@ -184,6 +194,8 @@ def _session_block(session: Session) -> list[str]:
 
 def _strength_block(session: StrengthSession) -> list[str]:
     tags = [session.template_id, f"session {session.variant}"]
+    if session.actual:
+        tags.append("done")
     if session.pinned:
         tags.append(f"pinned by {session.amendment_id}")
     equipment = ", ".join(item.value for item in session.equipment_used) or "bodyweight"

@@ -199,7 +199,7 @@ def plan_events(
     absolute: bool = False,
 ) -> list[dict[str, Any]]:
     """Event payloads of the sessions (then the strength sessions) between start and end
-    (inclusive)."""
+    (inclusive). Completed activities (plan adapt) are already in intervals.icu: not sent."""
 
     def inside(date: dt.date) -> bool:
         return (start is None or date >= start) and (end is None or date <= end)
@@ -208,13 +208,13 @@ def plan_events(
         event_payload(plan.id, session, absolute)
         for week in plan.weeks
         for session in week.sessions
-        if inside(session.date)
+        if inside(session.date) and not session.actual
     ]
     return events + [
         strength_payload(plan.id, session)
         for week in plan.weeks
         for session in week.strength
-        if inside(session.date)
+        if inside(session.date) and not session.actual
     ]
 
 

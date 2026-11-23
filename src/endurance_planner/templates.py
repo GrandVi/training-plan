@@ -463,7 +463,7 @@ def progress_rung(session: Session) -> int | None:
     An amended session without a rung was skipped, shortened or made easier: it does not
     count, so its ladder does not advance.
     """
-    if session.rung is not None:
+    if session.rung is not None or session.actual:
         return session.rung
     if session.amendment_id is not None or session.template_id is None:
         return None

@@ -7,7 +7,7 @@ import datetime as dt
 from collections.abc import Sequence
 from typing import NamedTuple
 
-from endurance_planner.load import run_impact_multiplier, tss
+from endurance_planner.load import run_impact_multiplier, tss, week_weighted_load
 from endurance_planner.models.enums import Intent, Scope, Sport
 from endurance_planner.models.plan import Week
 from endurance_planner.models.profile import Availability, Profile
@@ -79,6 +79,14 @@ CHANGE_REASONS = {
     "calendar_exception": "date covered by a calendar exception or an unavailable range",
     "undone": "amendment undone",
     "replanned": "rebuilt from the current profile",
+    "actual": "past day: replaced by what was done (plan adapt)",
+    "missed_key": "past day: key session not done (or under 80%); its rung is held",
+    "missed_key_moved": "missed key session placed on a later free day of its week",
+    "adapted": "current week rebuilt around what was done (no catch-up)",
+    "readiness": "next key session eased after two low-readiness days (training-load "
+    "heuristic, not health advice)",
+    "calendar_event": "date covered by a SICK, INJURED or HOLIDAY event read from "
+    "intervals.icu (preferences.adaptation.read_calendar_events)",
 }
 
 
@@ -128,6 +136,81 @@ def longest_session_cap(history_s: Sequence[float], sport: Sport, profile: Profi
     ref = reference(history_s, longest_recent_s(profile, sport))
     ramp = profile.preferences.limits.max_long_session_increase
     return max(ref * (1 + ramp), ref + LONG_STEP_S, LONG_START_S[sport])
+
+
+# --- plan adapt (F8) ---------------------------------------------------------------------
+# Overreach guard: in a week with completed activities, the values used as references for
+# the ramp caps are min(actual, planned x OVERREACH_FACTOR), so one oversized week cannot
+# raise every later cap.
+OVERREACH_FACTOR = 1.10
+# Under-training: a week done below this share of its planned load triggers no catch-up;
+# the next week's load is capped at the reference before that week.
+UNDER_TRAINING_SHARE = 0.70
+# A completed activity becomes one steady step whose IF comes from its TSS and duration,
+# kept in this range.
+ACTUAL_IF_RANGE = (0.30, 1.50)
+# Readiness gating (preferences.adaptation.use_wellness): low readiness on READINESS_DAYS
+# consecutive days (HRV below READINESS_HRV_RATIO of its mean over READINESS_BASELINE_DAYS,
+# with READINESS_MIN_BASELINE values at least, or TSB = CTL - ATL below READINESS_TSB)
+# downgrades the next key session one rung, or to endurance at the first rung.
+READINESS_DAYS = 2
+READINESS_HRV_RATIO = 0.90
+READINESS_BASELINE_DAYS = 28
+READINESS_MIN_BASELINE = 7
+READINESS_TSB = -25.0
+# preferences.adaptation.read_calendar_events: intervals.icu calendar categories read as
+# days off (UNVERIFIED names; other categories are ignored).
+CALENDAR_OFF_CATEGORIES = ("SICK", "INJURED", "HOLIDAY")
+
+
+def planned_version(week: Week) -> Week:
+    """The week as planned: the sessions replaced by what was done, and the planned rest."""
+    sessions = [*week.planned_sessions, *(s for s in week.sessions if not s.actual)]
+    strength = [*week.planned_strength, *(s for s in week.strength if not s.actual)]
+    return week.model_copy(
+        update={
+            "sessions": sorted(sessions, key=lambda s: s.date),
+            "strength": sorted(strength, key=lambda s: s.date),
+            "planned_sessions": [],
+            "planned_strength": [],
+        }
+    )
+
+
+def ref_load(week: Week, impact: float) -> float:
+    """Impact-weighted load of a past week as a ramp reference (overreach guard)."""
+    load = week_weighted_load(week, impact)
+    if not week.has_actual:
+        return load
+    return min(load, OVERREACH_FACTOR * week_weighted_load(planned_version(week), impact))
+
+
+def ref_run_s(week: Week) -> float:
+    run_s = float(week_run_s(week))
+    if not week.has_actual:
+        return run_s
+    return min(run_s, OVERREACH_FACTOR * week_run_s(planned_version(week)))
+
+
+def ref_longest_s(week: Week, sport: Sport) -> float:
+    longest = float(week_longest_s(week, sport))
+    if not week.has_actual:
+        return longest
+    return min(longest, OVERREACH_FACTOR * week_longest_s(planned_version(week), sport))
+
+
+def ref_duration_s(week: Week) -> float:
+    if not week.has_actual:
+        return float(week.duration_s)
+    return min(week.duration_s, OVERREACH_FACTOR * planned_version(week).duration_s)
+
+
+def under_trained(week: Week, impact: float) -> bool:
+    """A week with completed activities whose load stayed below UNDER_TRAINING_SHARE of plan."""
+    if not week.has_actual:
+        return False
+    planned = week_weighted_load(planned_version(week), impact)
+    return planned > 0 and week_weighted_load(week, impact) < UNDER_TRAINING_SHARE * planned
 
 
 def week_run_s(week: Week) -> int:

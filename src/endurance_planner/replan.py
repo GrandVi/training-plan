@@ -28,8 +28,10 @@ from endurance_planner.models.plan import Plan, Session, StrengthSession, Week
 from endurance_planner.models.profile import Profile
 from endurance_planner.periodization import PlanningError, WeekSkeleton, build_skeleton
 from endurance_planner.planner import plan_warnings
+from endurance_planner.rules import KEY_COMPLETED_SHARE, OVERREACH_FACTOR
 from endurance_planner.scheduler import Scheduler, WeekPins
 from endurance_planner.strength import StrengthPins, StrengthPlanner
+from endurance_planner.templates import progress_rung
 from endurance_planner.thresholds import resolve_thresholds
 from endurance_planner.units import format_duration
 from endurance_planner.validation import validate_plan
@@ -81,7 +83,10 @@ def session_label(session: Session | StrengthSession | None, none: str = "rest")
         return none
     pin = " (pinned)" if session.pinned else ""
     if isinstance(session, StrengthSession):
-        return f"Strength {session.minutes}m {session.name}{pin}"
+        done = " (done)" if session.actual else ""
+        return f"Strength {session.minutes}m {session.name}{pin}{done}"
+    if session.actual:
+        return f"{session.sport.value} {format_duration(session.duration_s)} {session.name} (done)"
     kind = session.activity_type.value + (" indoor" if session.indoor else "")
     duration = format_duration(session.duration_s)
     return f"{kind} {duration} {session.name} [{session.slot.value}]{pin}"
@@ -138,8 +143,24 @@ def _shape(item: Week | WeekSkeleton) -> tuple[object, ...]:
 
 
 def _lost(plan: Plan, start: dt.date, impact: float) -> tuple[float, float, float]:
-    """Volume, weighted load and run time taken out of the week by its amendments."""
+    """Volume, weighted load and run time taken out of the week by its amendments, and by
+    the days done below plan (plan adapt): the other days do not make them up."""
     lost_s = lost_load = lost_run_s = 0.0
+    week = next((w for w in plan.weeks if w.start == start), None)
+    if week is not None and week.planned_sessions:
+        done = [s for s in week.sessions if s.actual]
+        planned = week.planned_sessions
+
+        def run_of(sessions: Sequence[Session]) -> float:
+            return sum(s.duration_s for s in sessions if s.sport is Sport.RUN)
+
+        lost_s += max(0.0, sum(s.duration_s for s in planned) - sum(s.duration_s for s in done))
+        lost_load += max(
+            0.0,
+            sum(weighted_load(s, impact) for s in planned)
+            - sum(weighted_load(s, impact) for s in done),
+        )
+        lost_run_s += max(0.0, run_of(planned) - run_of(done))
     results = {s.amendment_id: s for week in plan.weeks for s in week.sessions if s.amendment_id}
     for amendment in plan.active_amendments(AmendmentKind.SESSION):
         original = amendment.original
@@ -218,6 +239,16 @@ def strength_pins(plan: Plan, index: int, today: dt.date) -> StrengthPins:
     )
 
 
+def _missed_strength(plan: Plan) -> set[dt.date]:
+    """Planned strength sessions that were not done (plan adapt): their ladder holds."""
+    return {
+        planned.date
+        for week in plan.weeks
+        for planned in week.planned_strength
+        if planned.date not in {s.date for s in week.strength if s.actual}
+    }
+
+
 def _skipped_strength(plan: Plan, start: dt.date, end: dt.date) -> list[dt.date]:
     """Dates of strength sessions skipped by an amendment (not replaced: no catch-up)."""
     return [
@@ -225,6 +256,41 @@ def _skipped_strength(plan: Plan, start: dt.date, end: dt.date) -> list[dt.date]
         for a in plan.active_amendments(AmendmentKind.STRENGTH)
         if a.skip and start <= a.date <= end
     ]
+
+
+def _keep_planned(plan: Plan, week: Week) -> Week:
+    """A rebuilt week keeps the planned sessions of its days already done (plan adapt)."""
+    source = next((w for w in plan.weeks if w.start == week.start), None)
+    if source is None or not (source.planned_sessions or source.planned_strength):
+        return week
+    return week.model_copy(
+        update={
+            "planned_sessions": source.planned_sessions,
+            "planned_strength": source.planned_strength,
+        }
+    )
+
+
+def _agrees(planned: Sequence[Session], done: Sequence[Session]) -> bool:
+    """The days done match the plan: the same sessions, or completed activities (plan adapt)
+    of the same day, sport, slot and key session, between 80% and 110% of the planned time."""
+    if len(planned) != len(done):
+        return False
+    for plan_s, done_s in zip(planned, done, strict=True):
+        if plan_s == done_s:
+            continue
+        if not done_s.actual or (plan_s.date, plan_s.sport, plan_s.slot) != (
+            done_s.date,
+            done_s.sport,
+            done_s.slot,
+        ):
+            return False
+        if done_s.template_id != plan_s.template_id or done_s.rung != progress_rung(plan_s):
+            return False
+        share = done_s.duration_s / plan_s.duration_s
+        if not KEY_COMPLETED_SHARE <= share <= OVERREACH_FACTOR:
+            return False
+    return True
 
 
 def _build_unamended(
@@ -238,8 +304,9 @@ def _build_unamended(
         return scheduler.build_week(sk, weeks, only_ahead)
     state = scheduler.snapshot()
     trial = scheduler.build_week(sk, weeks, only_ahead)
-    if [s for s in trial.sessions if s.date < today] == list(pins.sessions):
-        return trial
+    if _agrees([s for s in trial.sessions if s.date < today], list(pins.sessions)):
+        later = [s for s in trial.sessions if s.date >= today]
+        return trial.model_copy(update={"sessions": [*pins.sessions, *later]})
     scheduler.restore(state)
     return scheduler.build_week(sk, weeks, pins)
 
@@ -302,6 +369,7 @@ def replan_plan(
     reason_of: ReasonOf | None = None,
     default_reason: str = "replanned",
     baseline: Plan | None = None,
+    strength_held: Sequence[dt.date] = (),
 ) -> ReplanResult:
     """Rebuild weeks first_week..last_week (indexes; default: from the current week to the
     end) and return the plan with its changes and issues.
@@ -310,6 +378,7 @@ def replan_plan(
     adaptation from completed activities). baseline: the plan the changes are measured
     against (default: `plan`). Errors are not raised: the caller decides (see
     ReplanResult.errors, which only lists errors the baseline does not already have).
+    strength_held: dates of strength sessions not done (plan adapt): their ladder holds.
     """
     baseline = baseline or plan
     effective = plan.effective_profile(profile)
@@ -340,7 +409,8 @@ def replan_plan(
     weeks = list(kept)
     for sk in skeleton[first : last + 1]:
         pins = _pins(plan, sk, today, impact)
-        weeks.append(_build(scheduler, sk, weeks, pins, _originals(plan, sk.start), today))
+        built = _build(scheduler, sk, weeks, pins, _originals(plan, sk.start), today)
+        weeks.append(_keep_planned(plan, built))
     weeks += plan.weeks[last + 1 :] if last_week is not None else []
     # Strength goes in after the endurance sessions. The week before the first rebuilt one is
     # redone too when it is not over: its last days depend on the rebuilt week's first ones.
@@ -348,8 +418,10 @@ def replan_plan(
         first - 1 if first > 0 and plan.weeks[first - 1].start + dt.timedelta(6) >= today else first
     )
     planner = StrengthPlanner(effective, profile.goals)
-    planner.held = set(
-        _skipped_strength(plan, plan.weeks[0].start, plan.weeks[-1].start + dt.timedelta(6))
+    planner.held = (
+        set(_skipped_strength(plan, plan.weeks[0].start, plan.weeks[-1].start + dt.timedelta(6)))
+        | set(strength_held)
+        | _missed_strength(plan)
     )
     planner.seed(weeks[:low])
     pins_of = {index: strength_pins(plan, index, today) for index in range(low, last + 1)}
