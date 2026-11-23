@@ -107,6 +107,9 @@
           },
           "title": "Exceptions",
           "type": "array"
+        },
+        "strength": {
+          "$ref": "#/$defs/StrengthSettings"
         }
       },
       "required": [
@@ -256,6 +259,21 @@
           ],
           "default": null
         },
+        "equipment": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Equipment"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Equipment"
+        },
         "note": {
           "default": "",
           "title": "Note",
@@ -290,6 +308,20 @@
       ],
       "title": "CurrentFitness",
       "type": "object"
+    },
+    "Equipment": {
+      "description": "Strength equipment; bodyweight is always available.",
+      "enum": [
+        "bodyweight",
+        "dumbbells",
+        "barbell",
+        "kettlebell",
+        "bands",
+        "pullup_bar",
+        "machines"
+      ],
+      "title": "Equipment",
+      "type": "string"
     },
     "Experience": {
       "enum": [
@@ -690,6 +722,40 @@
         }
       },
       "title": "SportMinutes",
+      "type": "object"
+    },
+    "StrengthSettings": {
+      "additionalProperties": false,
+      "description": "Strength sessions (see strength.py). 0 sessions = off, the default.",
+      "properties": {
+        "sessions_per_week": {
+          "default": 0,
+          "maximum": 3,
+          "minimum": 0,
+          "title": "Sessions Per Week",
+          "type": "integer"
+        },
+        "minutes": {
+          "default": 40,
+          "maximum": 60,
+          "minimum": 20,
+          "title": "Minutes",
+          "type": "integer"
+        },
+        "allow_extra_days": {
+          "default": false,
+          "title": "Allow Extra Days",
+          "type": "boolean"
+        },
+        "equipment": {
+          "items": {
+            "$ref": "#/$defs/Equipment"
+          },
+          "title": "Equipment",
+          "type": "array"
+        }
+      },
+      "title": "StrengthSettings",
       "type": "object"
     },
     "SwapRules": {

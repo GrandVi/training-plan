@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Iterable, Iterator
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -24,7 +24,9 @@ from endurance_planner.models.enums import (
     ActivityType,
     AmendmentKind,
     BikeActivity,
+    Equipment,
     Intent,
+    Pattern,
     Phase,
     Scope,
     Slot,
@@ -148,6 +150,44 @@ class Session(BaseModel):
         return round(steps_tss(self.flat_steps(), self.sport), 1)
 
 
+class Exercise(BaseModel):
+    """One exercise of a strength session: sets x reps (or seconds) at a reps-in-reserve."""
+
+    id: str  # strength.EXERCISES key
+    name: str
+    pattern: Pattern
+    sets: int = Field(ge=1)
+    reps: int = Field(ge=1)
+    unit: Literal["reps", "s"] = "reps"  # "s": a hold, `reps` is seconds
+    rir: int | None = Field(None, ge=0, le=5)  # reps in reserve; None for holds
+    per_side: bool = False
+    accessory: bool = False  # dropped first when the session is shortened
+    note: str = ""
+
+    def label(self) -> str:
+        amount = f"{self.reps} s" if self.unit == "s" else f"{self.reps} reps"
+        side = " each side" if self.per_side else ""
+        effort = f", {self.rir} reps in reserve" if self.rir is not None else ""
+        return f"{self.name}: {self.sets} x {amount}{side}{effort}"
+
+
+class StrengthSession(BaseModel):
+    """A strength session (not a Sport: it stays out of the endurance load and ramp caps)."""
+
+    date: dt.date
+    name: str
+    phase: Phase
+    template_id: str  # strength.TEMPLATES key
+    variant: str = "full"  # A, B or full: which movement patterns it covers
+    exercises: list[Exercise] = Field(min_length=1)
+    minutes: int = Field(ge=1)
+    rationale: str = Field(min_length=1)
+    equipment_used: list[Equipment] = Field(default_factory=list)
+    rung: int | None = Field(None, ge=0)  # ladder level it completes (None: does not count)
+    pinned: bool = False
+    amendment_id: str | None = None
+
+
 class Week(BaseModel):
     index: int = Field(ge=1)
     start: dt.date  # Monday
@@ -156,6 +196,19 @@ class Week(BaseModel):
     goal: str = ""  # name of the goal driving this macrocycle
     races: list[str] = Field(default_factory=list)  # goals raced this week
     sessions: list[Session] = Field(default_factory=list)
+    # Strength sessions (F10). Not written while empty: plans without strength are unchanged.
+    strength: list[StrengthSession] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_strength(self, handler: SerializerFunctionWrapHandler) -> Any:
+        data = handler(self)
+        if not self.strength and isinstance(data, dict):
+            data.pop("strength", None)
+        return data
+
+    @property
+    def strength_minutes(self) -> int:
+        return sum(session.minutes for session in self.strength)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

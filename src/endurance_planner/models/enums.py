@@ -102,6 +102,7 @@ class ActivityType(StrEnum):
     RIDE = "Ride"
     MTB = "MountainBikeRide"
     RUN = "Run"
+    WEIGHT_TRAINING = "WeightTraining"
 
 
 class BikeActivity(StrEnum):
@@ -110,6 +111,30 @@ class BikeActivity(StrEnum):
     ROAD = "road"
     MTB = "mtb"
     TRAINER = "trainer"
+
+
+class Equipment(StrEnum):
+    """Strength equipment; bodyweight is always available."""
+
+    BODYWEIGHT = "bodyweight"
+    DUMBBELLS = "dumbbells"
+    BARBELL = "barbell"
+    KETTLEBELL = "kettlebell"
+    BANDS = "bands"
+    PULLUP_BAR = "pullup_bar"
+    MACHINES = "machines"
+
+
+class Pattern(StrEnum):
+    """Movement pattern of a strength exercise."""
+
+    SQUAT = "squat"
+    HINGE = "hinge"
+    SINGLE_LEG = "single_leg"
+    PUSH = "push"
+    PULL = "pull"
+    CALF = "calf"
+    CORE = "core"
 
 
 class Scope(StrEnum):

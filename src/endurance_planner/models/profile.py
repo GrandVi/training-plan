@@ -22,6 +22,7 @@ from pydantic import (
 
 from endurance_planner.models.enums import (
     BikeActivity,
+    Equipment,
     Experience,
     GoalType,
     Priority,
@@ -216,6 +217,7 @@ class CalendarException(_Strict):
     mode: Literal["off", "limited"]
     minutes: dict[Sport, DayMinutes] = Field(default_factory=dict)
     bike_activity: BikeActivity | None = None
+    equipment: list[Equipment] | None = None  # strength equipment on these dates
     note: str = ""
 
     @field_validator("mode", mode="before")
@@ -229,10 +231,14 @@ class CalendarException(_Strict):
         if self.end is not None and self.end < self.start:
             raise ValueError(f"exception {self.start}: 'to' ({self.end}) is before 'from'")
         where = f"exception {self.start}"
-        if self.mode == "off" and (self.minutes or self.bike_activity):
-            raise ValueError(f"{where}: mode 'off' takes no minutes or bike_activity")
-        if self.mode == "limited" and not (self.minutes or self.bike_activity):
-            raise ValueError(f"{where}: mode 'limited' needs minutes or bike_activity")
+        if self.mode == "off" and (self.minutes or self.bike_activity or self.equipment):
+            raise ValueError(f"{where}: mode 'off' takes no minutes, bike_activity or equipment")
+        if self.mode == "limited" and not (
+            self.minutes or self.bike_activity or self.equipment is not None
+        ):
+            raise ValueError(
+                f"{where}: mode 'limited' needs minutes or bike_activity (or equipment)"
+            )
         return self
 
     @property
@@ -251,8 +257,22 @@ class CalendarException(_Strict):
         details += [f"{sport} {minutes} min" for sport, minutes in sorted(self.minutes.items())]
         if self.bike_activity:
             details.append(f"bike: {self.bike_activity}")
+        if self.equipment is not None:
+            details.append("equipment: " + ", ".join(e.value for e in self.equipment or []))
         note = f" ({self.note})" if self.note else ""
         return f"{dates} {', '.join(details)}{note}"
+
+
+DEFAULT_EQUIPMENT = [Equipment.BODYWEIGHT, Equipment.DUMBBELLS, Equipment.BARBELL]
+
+
+class StrengthSettings(_Strict):
+    """Strength sessions (see strength.py). 0 sessions = off, the default."""
+
+    sessions_per_week: int = Field(0, ge=0, le=3)  # a cap: the phase table may ask for fewer
+    minutes: int = Field(40, ge=20, le=60)
+    allow_extra_days: bool = False  # true: may use a day without endurance training
+    equipment: list[Equipment] = Field(default_factory=lambda: list(DEFAULT_EQUIPMENT))
 
 
 class Availability(_Strict):
@@ -264,6 +284,7 @@ class Availability(_Strict):
     indoor_trainer_days: list[Weekday] = Field(default_factory=list)
     swap_rules: SwapRules = Field(default_factory=SwapRules)
     exceptions: list[CalendarException] = Field(default_factory=list)
+    strength: StrengthSettings = Field(default_factory=StrengthSettings)
 
     @field_validator("weekdays", mode="before")
     @classmethod
@@ -334,6 +355,20 @@ class Availability(_Strict):
             return forced
         indoor = WEEKDAYS[date.weekday()] in self.indoor_trainer_days
         return BikeActivity.TRAINER if indoor else None
+
+    def equipment(self, date: dt.date) -> set[Equipment]:
+        """Strength equipment on `date` (an exception's list, else the usual one), bodyweight
+        always included."""
+        exception = self.exception_on(date)
+        listed = self.strength.equipment
+        if exception is not None and exception.equipment is not None:
+            listed = exception.equipment
+        return {Equipment.BODYWEIGHT, *listed}
+
+    def off(self, date: dt.date) -> bool:
+        """An exception makes the date a day off (no training of any kind)."""
+        exception = self.exception_on(date)
+        return exception is not None and exception.mode == "off"
 
     def has_time(self, sport: Sport) -> bool:
         """True if some day of the weekly pattern or some exception has time for `sport`."""
