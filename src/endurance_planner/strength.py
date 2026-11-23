@@ -14,10 +14,22 @@ athlete.injury_notes is set. Generic guidance only: this is not injury or medica
 
 import datetime as dt
 import math
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from itertools import combinations, pairwise
 
-from endurance_planner.models.enums import Equipment, Pattern, Phase
-from endurance_planner.models.plan import Exercise, StrengthSession
+from endurance_planner.models.enums import (
+    Equipment,
+    Pattern,
+    Phase,
+    Priority,
+    Severity,
+    Slot,
+    Sport,
+)
+from endurance_planner.models.issues import Issue
+from endurance_planner.models.plan import Exercise, Session, StrengthSession, Week
+from endurance_planner.models.profile import Goal, Profile, StrengthSettings
 
 BW, DB, BB, KB = Equipment.BODYWEIGHT, Equipment.DUMBBELLS, Equipment.BARBELL, Equipment.KETTLEBELL
 BANDS, BAR, MACHINES = Equipment.BANDS, Equipment.PULLUP_BAR, Equipment.MACHINES
@@ -516,3 +528,298 @@ def description(session: StrengthSession) -> str:
     if session.equipment_used:
         lines.append("Equipment: " + ", ".join(item.value for item in session.equipment_used))
     return "\n".join([*lines, "", session.rationale])
+
+
+# --- placement --------------------------------------------------------------------------
+STRENGTH_MIN_GAP_DAYS = 2  # two strength sessions at least 48 h apart
+A_RACE_FREE_DAYS = 3  # no strength in the last 3 days before an A race
+LONG_SLOTS = (Slot.LONG, Slot.LONG_2)
+# Why a day cannot take a strength session (codes of day_problem), and the validation code
+# each one is reported under.
+DAY_PROBLEMS = {
+    "off": ("strength_placement", "the day is off (calendar exception)"),
+    "race": ("strength_race_proximity", "it is a race day or the day before a race"),
+    "a_race": (
+        "strength_race_proximity",
+        f"it is in the last {A_RACE_FREE_DAYS} days before an A race",
+    ),
+    "hard_or_long": ("strength_placement", "a hard or long session is planned that day"),
+    "before_hard_or_long": ("strength_placement", "a hard or long session follows the next day"),
+    "rest_day": (
+        "strength_placement",
+        "a rest day (no training time that day) and availability.strength.allow_extra_days "
+        "is false",
+    ),
+}
+
+
+def heavy(session: Session) -> bool:
+    """Hard or long endurance session: no strength that day nor the day before."""
+    return session.intent.hard or session.slot in LONG_SLOTS
+
+
+def weekly_count(phase: Phase, settings: StrengthSettings) -> int:
+    """Strength sessions planned in a week of `phase` (the phase table, capped by the profile)."""
+    return min(SESSIONS_PER_PHASE[phase], settings.sessions_per_week)
+
+
+def reserved_s(phase: Phase, settings: StrengthSettings) -> int:
+    """Weekly time kept free for strength when the endurance volume is set."""
+    return weekly_count(phase, settings) * settings.minutes * 60
+
+
+def loading(week: Week) -> bool:
+    """Weeks whose completed sessions advance the strength ladders."""
+    return not week.recovery and week.phase not in (Phase.TAPER, Phase.TRANSITION)
+
+
+def training_day(profile: Profile, date: dt.date) -> bool:
+    """The date has training time (weekly pattern or calendar exception)."""
+    return any(profile.availability.minutes(date, sport) > 0 for sport in Sport)
+
+
+def day_problems(
+    date: dt.date,
+    sessions: Mapping[dt.date, Session],
+    profile: Profile,
+    goals: Iterable[Goal],
+    explicit: bool = False,
+) -> list[str]:
+    """Why `date` cannot take a strength session (DAY_PROBLEMS keys; empty: it can).
+
+    sessions: endurance sessions by date. explicit: an amended session, which may be on a
+    rest day (the athlete chose it). A training day without an endurance session that week
+    is not a rest day; the weekly number of training days is checked separately."""
+    availability = profile.availability
+    problems: list[str] = []
+    if availability.off(date):
+        problems.append("off")
+    for goal in goals:
+        days = (goal.date - date).days
+        if days in (0, 1):
+            problems.append("race")
+        elif goal.priority is Priority.A and 0 < days <= A_RACE_FREE_DAYS:
+            problems.append("a_race")
+    same_day = sessions.get(date)
+    if same_day is not None and heavy(same_day):
+        problems.append("hard_or_long")
+    next_day = sessions.get(date + dt.timedelta(days=1))
+    if next_day is not None and heavy(next_day):
+        problems.append("before_hard_or_long")
+    extra_ok = availability.strength.allow_extra_days or explicit
+    if same_day is None and not extra_ok and not training_day(profile, date):
+        problems.append("rest_day")
+    return list(dict.fromkeys(problems))
+
+
+def training_days(week: Week, explicit: bool = True) -> set[dt.date]:
+    """Days of the week with an endurance or strength session (amended strength sessions are
+    left out when `explicit` is False: the athlete chose those days)."""
+    days = {session.date for session in week.sessions}
+    return days | {s.date for s in week.strength if explicit or s.amendment_id is None}
+
+
+@dataclass(frozen=True)
+class StrengthPins:
+    """Fixed strength content of a week (see replan.py): sessions kept as they are (done or
+    amended), dates of skipped sessions (not replaced: no catch-up), first date open."""
+
+    sessions: tuple[StrengthSession, ...] = ()
+    skipped: tuple[dt.date, ...] = ()
+    not_before: dt.date | None = None
+
+
+@dataclass
+class StrengthPlanner:
+    """Places strength sessions in weeks whose endurance sessions are already planned.
+
+    Days: after an easy endurance session, or on another training day of the week while the
+    week stays within days_per_week (rest days and more days only with allow_extra_days);
+    never on or the day before a hard or long session, never on or the day before a race,
+    none in the last A_RACE_FREE_DAYS days before an A race, at least STRENGTH_MIN_GAP_DAYS
+    apart. Days after an easy session come first, then the widest spacing, then the earliest
+    days.
+    Time: strength minutes count in the weekly budget: sessions are shortened (accessories
+    first), then dropped, with a warning. Ladders advance once per loading week, from the
+    rung of its completed sessions (an amended session without a rung holds it).
+    """
+
+    profile: Profile
+    goals: Sequence[Goal]
+    uses: dict[str, int] = field(default_factory=dict)  # template id -> next ladder level
+    shortened: list[int] = field(default_factory=list)  # week indexes
+    dropped: dict[int, int] = field(default_factory=dict)  # week index -> sessions dropped
+
+    @property
+    def settings(self) -> StrengthSettings:
+        return self.profile.availability.strength
+
+    def seed(self, weeks: Iterable[Week]) -> None:
+        """Ladder state reached after `weeks` (kept as they are)."""
+        for week in weeks:
+            self._advance(week)
+
+    def _advance(self, week: Week) -> None:
+        if not loading(week):
+            return
+        for session in week.strength:
+            if session.rung is not None:
+                done = self.uses.get(session.template_id, 0)
+                self.uses[session.template_id] = max(done, session.rung + 1)
+
+    def place(
+        self,
+        weeks: list[Week],
+        first: int = 0,
+        last: int | None = None,
+        pins: Mapping[int, StrengthPins] | None = None,
+    ) -> list[Week]:
+        """`weeks` with strength sessions placed in weeks first..last (the others are kept;
+        call seed() with the weeks before `first` beforehand)."""
+        last = len(weeks) - 1 if last is None else last
+        pins = pins or {}
+        sessions = {s.date: s for week in weeks for s in week.sessions}
+        result = list(weeks)
+        for index in range(first, last + 1):
+            week = result[index]
+            if self.settings.sessions_per_week or week.strength:
+                neighbours = [
+                    s.date
+                    for other in (index - 1, index + 1)
+                    if 0 <= other < len(result)
+                    for s in result[other].strength
+                ]
+                strength = self._week(week, sessions, pins.get(index, StrengthPins()), neighbours)
+                result[index] = week.model_copy(update={"strength": strength})
+            self._advance(result[index])
+        return result
+
+    def _week(
+        self,
+        week: Week,
+        sessions: Mapping[dt.date, Session],
+        pins: StrengthPins,
+        neighbours: list[dt.date],
+    ) -> list[StrengthSession]:
+        kept = list(pins.sessions)
+        count = weekly_count(week.phase, self.settings) - len(kept) - len(pins.skipped)
+        if count <= 0:
+            return kept
+        taken = {s.date for s in kept} | set(pins.skipped)
+        candidates = [
+            date
+            for date in (week.start + dt.timedelta(days=offset) for offset in range(7))
+            if date not in taken
+            and (pins.not_before is None or date >= pins.not_before)
+            and not day_problems(date, sessions, self.profile, self.goals)
+        ]
+        fixed = sorted([*taken, *neighbours])
+        extra_days = len(candidates)  # strength-only days the week may still take
+        if not self.settings.allow_extra_days:
+            used = {s.date for s in week.sessions} | {s.date for s in kept}
+            extra_days = max(0, self.profile.availability.days_per_week - len(used))
+        dates = self._choose(candidates, count, fixed, sessions, extra_days)
+        if len(dates) < count:
+            self.dropped[week.index] = self.dropped.get(week.index, 0) + count - len(dates)
+        budget = self.profile.availability.weekly_hours_budget * 60
+        free = budget - week.duration_s / 60 - sum(s.minutes for s in kept)
+        placed = self._build(week, list(dates), free, len(kept))
+        return sorted([*kept, *placed], key=lambda s: s.date)
+
+    @staticmethod
+    def _choose(
+        candidates: list[dt.date],
+        count: int,
+        fixed: list[dt.date],
+        sessions: Mapping[dt.date, Session],
+        extra_days: int,
+    ) -> tuple[dt.date, ...]:
+        """Dates for up to `count` sessions: at most `extra_days` without an endurance
+        session, STRENGTH_MIN_GAP_DAYS apart (fixed dates included); days after an endurance
+        session first, then the widest spacing, then the earliest dates."""
+        for size in range(min(count, len(candidates)), 0, -1):
+            best: tuple[tuple[int, int, tuple[dt.date, ...]], tuple[dt.date, ...]] | None = None
+            for combo in combinations(candidates, size):
+                dates = sorted([*combo, *fixed])
+                gaps = [(b - a).days for a, b in pairwise(dates)]
+                if any(gap < STRENGTH_MIN_GAP_DAYS for gap in gaps):
+                    continue
+                strength_only = sum(date not in sessions for date in combo)
+                if strength_only > extra_days:
+                    continue
+                key = (strength_only, -min(gaps, default=7), combo)
+                if best is None or key < best[0]:
+                    best = (key, combo)
+            if best is not None:
+                return best[1]
+        return ()
+
+    def _build(
+        self, week: Week, dates: list[dt.date], free_min: float, done: int
+    ) -> list[StrengthSession]:
+        """Sessions on `dates`, shortened then dropped (last first) to fit `free_min`."""
+        minutes = self.settings.minutes
+        while dates:
+            built = [
+                self._session(week, date, done + position, done + len(dates), minutes)
+                for position, date in enumerate(dates)
+            ]
+            sessions = [session for session in built if session is not None]
+            if len(sessions) == len(dates) and sum(s.minutes for s in sessions) <= free_min:
+                if minutes < self.settings.minutes:
+                    self.shortened.append(week.index)
+                return sessions
+            if len(sessions) == len(dates):  # over budget: shorter sessions
+                minutes = min(minutes - 5, int(free_min / len(dates) // 5 * 5))
+                continue
+            dates.pop()  # too short to be useful: one session less
+            self.dropped[week.index] = self.dropped.get(week.index, 0) + 1
+            minutes = self.settings.minutes
+        return []
+
+    def _session(
+        self, week: Week, date: dt.date, position: int, total: int, minutes: int
+    ) -> StrengthSession | None:
+        template_id = PHASE_TEMPLATE[week.phase]
+        level = self.uses.get(template_id, 0)
+        if not loading(week):  # recovery, taper, transition: the last rung done, not a new one
+            level = max(0, level - 1)
+        return build_session(
+            SessionRequest(
+                date=date,
+                phase=week.phase,
+                template_id=template_id,
+                level=level,
+                variant=variant_of(position, total),
+                recovery=week.recovery,
+                equipment=frozenset(self.profile.availability.equipment(date)),
+                injury=bool(self.profile.athlete.injury_notes.strip()),
+                minutes=minutes,
+            )
+        )
+
+    def issues(self) -> list[Issue]:
+        """Warnings about the sessions shortened or dropped."""
+        issues: list[Issue] = []
+        if self.shortened:
+            weeks = ", ".join(str(index) for index in sorted(set(self.shortened)))
+            issues.append(
+                Issue(
+                    severity=Severity.WARNING,
+                    code="strength_shortened",
+                    message=f"strength sessions shortened to fit the weekly hours budget "
+                    f"(weeks {weeks}); accessory exercises go first",
+                )
+            )
+        if self.dropped:
+            weeks = ", ".join(str(index) for index in sorted(self.dropped))
+            issues.append(
+                Issue(
+                    severity=Severity.WARNING,
+                    code="strength_dropped",
+                    message=f"{sum(self.dropped.values())} strength session(s) not planned "
+                    f"(weeks {weeks}): no day without a hard or long session the next day, "
+                    "a race nearby, or no time left in the weekly hours budget",
+                )
+            )
+        return issues

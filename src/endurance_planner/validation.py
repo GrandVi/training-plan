@@ -13,6 +13,7 @@ from endurance_planner.models.enums import (
     ActivityType,
     AmendmentKind,
     BikeActivity,
+    Equipment,
     GoalType,
     Phase,
     Severity,
@@ -22,7 +23,7 @@ from endurance_planner.models.enums import (
     Weekday,
 )
 from endurance_planner.models.issues import Issue
-from endurance_planner.models.plan import Plan, Session, Week
+from endurance_planner.models.plan import Plan, Session, StrengthSession, Week
 from endurance_planner.models.profile import Profile
 from endurance_planner.rules import (
     HARD_MIN_GAP_DAYS,
@@ -38,6 +39,20 @@ from endurance_planner.rules import (
     run_volume_cap,
     week_longest_s,
     week_run_s,
+)
+from endurance_planner.strength import (
+    DAY_PROBLEMS,
+    EXERCISES,
+    PHASE_TEMPLATE,
+    STRENGTH_MIN_GAP_DAYS,
+    day_problems,
+    exercise_equipment,
+    prescription,
+    training_days,
+    weekly_count,
+)
+from endurance_planner.strength import (
+    TEMPLATES as STRENGTH_TEMPLATES,
 )
 from endurance_planner.templates import progress_rung
 from endurance_planner.zones import ZoneSet, zone_set
@@ -98,16 +113,29 @@ def _check_structure(plan: Plan, today: dt.date) -> Iterator[Issue]:
                 yield _error(
                     "session_on_race_day", f"{session.date} {session.name} is on a race day", week
                 )
+        strength_dates = [session.date for session in week.strength]
+        if len(set(strength_dates)) != len(strength_dates):
+            yield _error(
+                "two_sessions_same_day", "more than one strength session on the same day", week
+            )
+        for strength in week.strength:
+            if not week.start <= strength.date < week.start + dt.timedelta(weeks=1):
+                yield _error("session_outside_week", f"{strength.date} is outside its week", week)
+            if strength.date < today:
+                yield _error(
+                    "session_in_past", f"{strength.date} {strength.name} is in the past", week
+                )
 
 
 def _check_availability(plan: Plan, profile: Profile) -> Iterator[Issue]:
     availability = profile.availability
     budget_s = availability.weekly_hours_budget * 3600
     for week in plan.weeks:
-        if week.duration_s > budget_s + 1:
+        planned_s = week.duration_s + week.strength_minutes * 60  # strength counts too
+        if planned_s > budget_s + 1:
             yield _error(
                 "weekly_budget",
-                f"{week.duration_s / 3600:.1f} h planned, budget is {budget_s / 3600:.1f} h",
+                f"{planned_s / 3600:.1f} h planned, budget is {budget_s / 3600:.1f} h",
                 week,
             )
         if len(week.sessions) > availability.days_per_week:
@@ -438,6 +466,110 @@ def _check_amendments(plan: Plan) -> Iterator[Issue]:
             )
 
 
+def _check_strength(plan: Plan, profile: Profile) -> Iterator[Issue]:
+    """Strength sessions (F10): placement, phase and prescription, equipment, race
+    proximity and weekly count."""
+    endurance = {s.date: s for week in plan.weeks for s in week.sessions}
+    settings = profile.availability.strength
+    injury = bool(profile.athlete.injury_notes.strip())
+    previous: StrengthSession | None = None
+    for week in plan.weeks:
+        days = len(training_days(week, explicit=False))
+        if not settings.allow_extra_days and days > profile.availability.days_per_week:
+            yield _error(
+                "strength_placement",
+                f"{days} training days with strength, limit is "
+                f"{profile.availability.days_per_week} (availability.strength.allow_extra_days "
+                "is false)",
+                week,
+            )
+        allowed = weekly_count(week.phase, settings)
+        if len(week.strength) > allowed:
+            yield _error(
+                "strength_count",
+                f"{len(week.strength)} strength sessions, {week.phase} weeks allow {allowed} "
+                f"(phase table capped by availability.strength.sessions_per_week)",
+                week,
+            )
+        for session in sorted(week.strength, key=lambda s: s.date):
+            label = f"{session.date} {session.name}"
+            explicit = session.amendment_id is not None
+            for problem in day_problems(session.date, endurance, profile, plan.goals, explicit):
+                code, why = DAY_PROBLEMS[problem]
+                yield _error(code, f"{label}: {why}", week)
+            if previous is not None and (session.date - previous.date).days < (
+                STRENGTH_MIN_GAP_DAYS
+            ):
+                yield _error(
+                    "strength_placement",
+                    f"strength sessions on {previous.date} and {session.date} are less than "
+                    "48 h apart",
+                    week,
+                )
+            previous = session
+            yield from _check_strength_phase(session, week)
+            available = profile.availability.equipment(session.date)
+            available |= set(_amended_equipment(plan, session))
+            for exercise in session.exercises:
+                spec = EXERCISES.get(exercise.id)
+                if spec is None:
+                    yield _error(
+                        "strength_equipment", f"{label}: unknown exercise '{exercise.id}'", week
+                    )
+                    continue
+                if exercise_equipment(spec, available) is None:
+                    needs = " or ".join(item.value for item in spec.equipment)
+                    yield _error(
+                        "strength_equipment",
+                        f"{label}: {spec.name} needs {needs}, not available that day",
+                        week,
+                    )
+                if injury and spec.high_impact:
+                    yield _error(
+                        "strength_equipment",
+                        f"{label}: {spec.name} is a higher-impact exercise, left out while "
+                        "athlete.injury_notes is set",
+                        week,
+                    )
+
+
+def _amended_equipment(plan: Plan, session: StrengthSession) -> list[Equipment]:
+    """Equipment stated by the amendment that produced the session (none: the profile's)."""
+    return []
+
+
+def _check_strength_phase(session: StrengthSession, week: Week) -> Iterator[Issue]:
+    label = f"{session.date} {session.name}"
+    expected = PHASE_TEMPLATE[week.phase]
+    template = STRENGTH_TEMPLATES.get(session.template_id)
+    if session.template_id != expected or session.phase is not week.phase or template is None:
+        yield _error(
+            "strength_phase",
+            f"{label}: template '{session.template_id}' in a {week.phase} week "
+            f"(expected '{expected}')",
+            week,
+        )
+        return
+    rungs = [session.rung] if session.rung is not None else range(len(template.ladder))
+    if any(rung >= len(template.ladder) for rung in rungs):
+        yield _error("strength_phase", f"{label}: rung {session.rung} is off the ladder", week)
+        return
+    main = [e for e in session.exercises if not e.accessory and e.unit == "reps"]
+
+    def matches(rung: int) -> bool:
+        sets, reps, rir = prescription(template.id, rung, week.recovery)
+        return all((e.reps, e.rir) == (reps, rir) and e.sets <= sets for e in main)
+
+    fits = any(matches(rung) for rung in rungs)
+    if not fits:
+        yield _error(
+            "strength_phase",
+            f"{label}: the prescription does not match the {template.name.lower()} ladder"
+            f"{' (recovery week)' if week.recovery else ''}",
+            week,
+        )
+
+
 def _check_targets(plan: Plan) -> Iterator[Issue]:
     for week in plan.weeks:
         for session in week.sessions:
@@ -477,6 +609,7 @@ def validate_plan(plan: Plan, profile: Profile, today: dt.date | None = None) ->
         *_check_intensity(plan, profile, zones),
         *_check_ladders(plan),
         *_check_amendments(plan),
+        *_check_strength(plan, profile),
         *_check_targets(plan),
     ]
 

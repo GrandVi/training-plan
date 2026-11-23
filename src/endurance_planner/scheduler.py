@@ -63,6 +63,7 @@ from endurance_planner.rules import (
     week_run_s,
 )
 from endurance_planner.specificity import GOAL_DISTANCE_KM, GOAL_SPECS, GoalSpec
+from endurance_planner.strength import reserved_s
 from endurance_planner.swap import convert_session, other_sport
 from endurance_planner.targets import express_blocks, resolve_session
 from endurance_planner.templates import (
@@ -160,6 +161,8 @@ class WeekPins:
     behind: sessions of the previous week as planned before its amendments. They still
         count for the spacing of hard sessions and of hard or long runs, so that a skipped
         or moved session does not open a day for an extra key session (no catch-up).
+    strength_days: dates of fixed strength sessions (done or amended): no key session on
+        them or the day after (see strength.day_problem).
     """
 
     sessions: tuple[Session, ...] = ()
@@ -172,6 +175,7 @@ class WeekPins:
     others_max_s: float | None = None
     others_max_load: float | None = None
     behind: tuple[Session, ...] = ()
+    strength_days: tuple[dt.date, ...] = ()
 
     @property
     def consumed(self) -> tuple[Session, ...]:
@@ -555,7 +559,12 @@ class Scheduler:
             s.date for s in pins.sessions if s.slot in LONG_SLOTS
         }
 
-        free = [date for date in available if date not in long_dates and date not in eves]
+        strength = {day + dt.timedelta(days=d) for day in pins.strength_days for d in (0, 1)}
+        free = [
+            date
+            for date in available
+            if date not in long_dates and date not in eves and date not in strength
+        ]
         if sk.race is not None:
             free = [date for date in free if 2 <= (sk.race.date - date).days <= 4]
         previous_hard = [s.date for s in history[-1].sessions if s.intent.hard] if history else []
@@ -1108,6 +1117,10 @@ class Scheduler:
         if goal_sport not in self.enabled:
             goal_sport = other_sport(goal_sport)
         hours_s = self._volume(sk, history)
+        reserve = reserved_s(sk.phase, self.profile.availability.strength)
+        if reserve:  # strength minutes count in the weekly budget (not in the load caps)
+            budget_s = self.profile.availability.weekly_hours_budget * 3600
+            hours_s = min(hours_s, max(0.0, budget_s - reserve))
         caps = self._caps(sk, history, goal_sport, spec, hours_s)
         picked = self._key_templates(sk, spec, self.profile.goal_sport(sk.goal))
         fixed: tuple[Session, ...] = ()

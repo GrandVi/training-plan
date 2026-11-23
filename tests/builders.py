@@ -180,3 +180,10 @@ def free_long_day_profile() -> Profile:
             "availability.weekly_hours_budget": 11,
         },
     )
+
+
+def with_strength(profile: Profile, **settings: Any) -> Profile:
+    """The profile with availability.strength set (2 sessions a week by default)."""
+    data = profile.model_dump(mode="json", by_alias=True)
+    data["availability"]["strength"] = {"sessions_per_week": 2, **settings}
+    return Profile.model_validate(data)

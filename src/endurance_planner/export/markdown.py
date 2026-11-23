@@ -9,6 +9,7 @@ from endurance_planner.load import (
     low_intensity_ratio,
     project_fitness,
     run_impact_multiplier,
+    strength_tss,
     week_weighted_load,
 )
 from endurance_planner.models.enums import Sport, StepKind
@@ -113,7 +114,13 @@ def weekly_csv(plan: Plan, profile: Profile) -> str:
 
 
 def daily_tss(plan: Plan) -> list[tuple[dt.date, float]]:
+    """Planned TSS per day; strength sessions add their flat estimate (STRENGTH_TSS_PER_HOUR)."""
     by_date = {s.date: s.tss for week in plan.weeks for s in week.sessions}
+    for week in plan.weeks:
+        for strength in week.strength:
+            by_date[strength.date] = by_date.get(strength.date, 0.0) + strength_tss(
+                strength.minutes
+            )
     days = [week.start + dt.timedelta(days=offset) for week in plan.weeks for offset in range(7)]
     return [(day, by_date.get(day, 0.0)) for day in days]
 

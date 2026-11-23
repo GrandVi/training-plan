@@ -26,6 +26,15 @@ if TYPE_CHECKING:
     from endurance_planner.models.profile import Profile
 
 
+# Flat load estimate of strength sessions (F10). It feeds the CTL/ATL/TSB projection and the
+# event load pushed to intervals.icu only, never the ramp caps.
+STRENGTH_TSS_PER_HOUR = 35.0
+
+
+def strength_tss(minutes: float) -> float:
+    return round(minutes / 60 * STRENGTH_TSS_PER_HOUR, 1)
+
+
 def tss(duration_s: float, intensity_factor: float) -> float:
     return duration_s / 3600 * intensity_factor**2 * 100
 

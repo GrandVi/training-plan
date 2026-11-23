@@ -24,11 +24,12 @@ from dataclasses import dataclass, replace
 from endurance_planner.load import run_impact_multiplier, week_weighted_load, weighted_load
 from endurance_planner.models.enums import AmendmentKind, Severity, Sport
 from endurance_planner.models.issues import Issue
-from endurance_planner.models.plan import Plan, Session, Week
+from endurance_planner.models.plan import Plan, Session, StrengthSession, Week
 from endurance_planner.models.profile import Profile
 from endurance_planner.periodization import PlanningError, WeekSkeleton, build_skeleton
 from endurance_planner.planner import plan_warnings
 from endurance_planner.scheduler import Scheduler, WeekPins
+from endurance_planner.strength import StrengthPins, StrengthPlanner
 from endurance_planner.thresholds import resolve_thresholds
 from endurance_planner.units import format_duration
 from endurance_planner.validation import validate_plan
@@ -171,6 +172,11 @@ def _pins(plan: Plan, sk: WeekSkeleton, today: dt.date, impact: float) -> WeekPi
     ahead = [s for s in sessions if s.pinned and end < s.date <= next_end]
     lost_s, lost_load, lost_run_s = _lost(plan, sk.start, impact)
     behind = _originals(plan, sk.start - dt.timedelta(weeks=1))
+    strength_days = [
+        s.date
+        for s in _fixed_strength(plan, today)
+        if sk.start - dt.timedelta(days=1) <= s.date <= end
+    ]
     return WeekPins(
         sessions=tuple(sorted(fixed, key=lambda s: s.date)),
         skipped=tuple(skipped),
@@ -180,7 +186,31 @@ def _pins(plan: Plan, sk: WeekSkeleton, today: dt.date, impact: float) -> WeekPi
         lost_run_s=lost_run_s,
         ahead=tuple(ahead),
         behind=tuple(behind),
+        strength_days=tuple(strength_days),
     )
+
+
+def _fixed_strength(plan: Plan, today: dt.date) -> list[StrengthSession]:
+    """Strength sessions a replan keeps: done (before today) or amended (pinned)."""
+    return [s for week in plan.weeks for s in week.strength if s.date < today or s.pinned]
+
+
+def strength_pins(plan: Plan, index: int, today: dt.date) -> StrengthPins:
+    """Fixed strength content of plan week `index` for a replan."""
+    if index >= len(plan.weeks):
+        return StrengthPins()
+    week = plan.weeks[index]
+    end = week.start + dt.timedelta(days=6)
+    return StrengthPins(
+        sessions=tuple(s for s in _fixed_strength(plan, today) if week.start <= s.date <= end),
+        skipped=tuple(_skipped_strength(plan, week.start, end)),
+        not_before=today if week.start < today else None,
+    )
+
+
+def _skipped_strength(plan: Plan, start: dt.date, end: dt.date) -> list[dt.date]:
+    """Dates of strength sessions skipped by an amendment (not replaced: no catch-up)."""
+    return []
 
 
 def _build_unamended(
@@ -188,8 +218,8 @@ def _build_unamended(
 ) -> Week:
     """A week without amendments. If it has started, it is first built as at generation time
     and kept when it agrees with what was done; otherwise it is built around the past."""
-    around = WeekPins(ahead=pins.ahead, behind=pins.behind)
-    only_ahead = around if pins.ahead or pins.behind else None
+    around = WeekPins(ahead=pins.ahead, behind=pins.behind, strength_days=pins.strength_days)
+    only_ahead = around if pins.ahead or pins.behind or pins.strength_days else None
     if not pins.sessions and pins.not_before is None:
         return scheduler.build_week(sk, weeks, only_ahead)
     state = scheduler.snapshot()
@@ -219,7 +249,11 @@ def _build(
     done = tuple(s for s in pins.sessions if not s.pinned)
     state = scheduler.snapshot()
     plain = WeekPins(
-        sessions=done, not_before=pins.not_before, ahead=pins.ahead, behind=pins.behind
+        sessions=done,
+        not_before=pins.not_before,
+        ahead=pins.ahead,
+        behind=pins.behind,
+        strength_days=pins.strength_days,
     )
     reference = _build_unamended(scheduler, sk, weeks, plain, today)
     scheduler.restore(state)
@@ -294,6 +328,15 @@ def replan_plan(
         pins = _pins(plan, sk, today, impact)
         weeks.append(_build(scheduler, sk, weeks, pins, _originals(plan, sk.start), today))
     weeks += plan.weeks[last + 1 :] if last_week is not None else []
+    # Strength goes in after the endurance sessions. The week before the first rebuilt one is
+    # redone too when it is not over: its last days depend on the rebuilt week's first ones.
+    low = (
+        first - 1 if first > 0 and plan.weeks[first - 1].start + dt.timedelta(6) >= today else first
+    )
+    planner = StrengthPlanner(effective, profile.goals)
+    planner.seed(weeks[:low])
+    pins_of = {index: strength_pins(plan, index, today) for index in range(low, last + 1)}
+    weeks = planner.place(weeks, low, last, pins_of)
 
     issues: list[Issue] = []
     placed = {s.date for week in weeks for s in week.sessions if s.pinned}
@@ -309,7 +352,10 @@ def replan_plan(
                     )
                 )
     warnings = (
-        threshold_issues + skeleton_issues + plan_warnings(effective, start, weeks, scheduler)
+        threshold_issues
+        + skeleton_issues
+        + plan_warnings(effective, start, weeks, scheduler)
+        + planner.issues()
     )
     replanned = plan.model_copy(
         update={

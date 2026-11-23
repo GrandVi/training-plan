@@ -11,6 +11,7 @@ from endurance_planner.periodization import PlanningError, build_skeleton, defau
 from endurance_planner.rules import PRE_RACE_EXCEPTION_DAYS
 from endurance_planner.scheduler import Scheduler
 from endurance_planner.specificity import GOAL_SPECS
+from endurance_planner.strength import StrengthPlanner
 from endurance_planner.targets import resolve_plan
 from endurance_planner.thresholds import resolve_thresholds
 from endurance_planner.validation import assert_valid
@@ -98,8 +99,11 @@ def generate_plan(profile: Profile, today: dt.date, start: dt.date | None = None
     weeks: list[Week] = []
     for week in skeleton:
         weeks.append(scheduler.build_week(week, weeks))
+    strength = StrengthPlanner(profile, profile.goals)
+    weeks = strength.place(weeks)
 
     issues += skeleton_issues + plan_warnings(profile, start, weeks, scheduler)
+    issues += strength.issues()
     plan = Plan(
         id=plan_id(profile, start),
         created=today,
