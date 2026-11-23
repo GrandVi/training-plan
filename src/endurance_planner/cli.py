@@ -18,7 +18,7 @@ from endurance_planner.export.intervals_icu import (
     threshold_diffs,
     update_yaml_scalars,
 )
-from endurance_planner.export.json_io import load_plan, save_plan
+from endurance_planner.export.json_io import load_history, load_plan, save_history, save_plan
 from endurance_planner.export.markdown import render_markdown
 from endurance_planner.models.enums import (
     BikeActivity,
@@ -29,6 +29,7 @@ from endurance_planner.models.enums import (
     Severity,
     Sport,
 )
+from endurance_planner.models.history import History
 from endurance_planner.models.issues import Issue
 from endurance_planner.models.plan import Plan
 from endurance_planner.models.profile import Profile
@@ -536,6 +537,48 @@ def plan_replan(
     _changes(outcome, plan, out)
 
 
+HistoryOption = Annotated[
+    Path, typer.Option("--history", help="History of completed activities (JSON, see sync).")
+]
+
+
+def _history(path: Path) -> History:
+    try:
+        return load_history(path)
+    except (OSError, ValueError) as exc:
+        raise _fail(f"cannot read {path}: {exc}") from exc
+
+
+@plan_app.command("review")
+def plan_review(
+    plan: PlanArgument,
+    history: HistoryOption = Path("history.json"),
+    week: Annotated[int | None, typer.Option(min=1, help="Only this week (1-based).")] = None,
+    since: Annotated[
+        str | None, typer.Option(help="Only the weeks ending on or after this date.")
+    ] = None,
+    fmt: Annotated[str, typer.Option("--format", "-f", help="md or csv.")] = "md",
+    out: OutOption = None,
+    today: TodayOption = None,
+) -> None:
+    """Planned vs actual, week by week: duration, TSS, key sessions, hard sessions, low/high
+    share (from history.json, written by `sync`)."""
+    if week is not None and since is not None:
+        raise _fail("give --week or --since, not both")
+    fmt = {"markdown": "md"}.get(fmt, fmt)
+    try:
+        result = services.review_plan(
+            _plan(plan),
+            _history(history),
+            _date(today),
+            week=week,
+            since=_date(since) if since else None,
+        )
+        _write(services.render_review(result, fmt), out)
+    except (services.UnknownWeek, services.UnknownFormat) as exc:
+        raise _fail(str(exc)) from exc
+
+
 @plan_app.command("amendments")
 def plan_amendments(
     plan: PlanArgument,
@@ -664,6 +707,40 @@ def push(
     typer.echo(
         f"pushed {report.upserted} workout(s), removed {report.pruned} stale event(s){unchanged}"
     )
+
+
+@app.command()
+def sync(
+    history: HistoryOption = Path("history.json"),
+    since: Annotated[
+        str | None,
+        typer.Option(help="First day to read (default: 7 days before the last sync, or 28 days)."),
+    ] = None,
+    dry_run: Annotated[bool, typer.Option(help="Read and report, write nothing.")] = False,
+    athlete_id: AthleteOption = None,
+    verbose: VerboseOption = False,
+    today: TodayOption = None,
+) -> None:
+    """Read completed activities and wellness from intervals.icu into history.json
+    (idempotent: activities are matched by id; nothing stored is dropped)."""
+    stored = _history(history)
+    try:
+        merged, report = services.sync_history(
+            stored,
+            make_client(athlete_id, verbose),
+            _date(today),
+            since=_date(since) if since else None,
+            dry_run=dry_run,
+        )
+    except IntervalsError as exc:
+        raise _fail(str(exc)) from exc
+    for line in report.lines():
+        typer.echo(line)
+    if dry_run:
+        typer.echo("dry run: nothing written", err=True)
+        return
+    save_history(merged, history)
+    typer.echo(f"wrote {history}", err=True)
 
 
 @app.command()

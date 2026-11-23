@@ -1,0 +1,7 @@
+[
+  {"id": "2026-11-17", "ctl": 45.2, "atl": 50.1, "restingHR": 48, "hrv": 62.5, "sleepSecs": 27000,
+   "sleepScore": 82, "weight": 72.1, "unknownField": "x"},
+  {"id": "2026-11-18", "hrv": "n/a", "restingHR": null, "ctl": 46.0, "atl": -3},
+  {"date": "2026-11-19", "hrvRMSSD": 58},
+  {"foo": 1}
+]

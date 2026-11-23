@@ -18,8 +18,14 @@ ATHLETE = {
 class FakeIntervals:
     """Calendar keyed by event id, upsert on external_id; records the clients' API keys."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        activities: list[dict[str, Any]] | None = None,
+        wellness: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.events: dict[int, dict[str, Any]] = {}
+        self.activities = activities or []  # completed activities (F7)
+        self.wellness = wellness or []
         self.next_id = 100
         self.transport = FakeTransport(self.handle)
         self.closed = 0
@@ -49,6 +55,15 @@ class FakeIntervals:
                 e for e in self.events.values() if oldest <= e["start_date_local"][:10] <= newest
             ]
             return json_response(found)
+        if request.method == "GET" and path.endswith(("/activities", "/wellness")):
+            oldest, newest = params["oldest"], params["newest"]
+            records = self.activities if path.endswith("/activities") else self.wellness
+
+            def day(record: dict[str, Any]) -> str:
+                keys = ("start_date_local",) if records is self.activities else ("id", "date")
+                return str(next((record[k] for k in keys if record.get(k)), ""))[:10]
+
+            return json_response([r for r in records if oldest <= day(r) <= newest or not day(r)])
         if request.method == "PUT" and path.endswith("/events/bulk-delete"):
             for item in request.json:
                 self.events.pop(item["id"], None)

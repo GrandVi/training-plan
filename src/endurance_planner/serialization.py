@@ -1,4 +1,4 @@
-"""Text forms of the profile (YAML) and of the plan (JSON). Pure: no file access.
+"""Text forms of the profile (YAML), the plan and the history (JSON). Pure: no file access.
 
 File adapters (config.py, export/json_io.py, storage.py) read and write the text.
 """
@@ -6,6 +6,7 @@ File adapters (config.py, export/json_io.py, storage.py) read and write the text
 import yaml
 from pydantic import ValidationError
 
+from endurance_planner.models.history import HISTORY_SCHEMA_VERSION, History
 from endurance_planner.models.plan import Plan
 from endurance_planner.models.profile import Profile
 
@@ -40,3 +41,18 @@ def dump_plan(plan: Plan) -> str:
 def parse_plan(text: str) -> Plan:
     """Plan from its JSON form (older schema versions are migrated in memory)."""
     return Plan.model_validate_json(text)
+
+
+def dump_history(history: History) -> str:
+    """Canonical JSON form of history.json."""
+    return history.model_dump_json(indent=2) + "\n"
+
+
+def parse_history(text: str) -> History:
+    history = History.model_validate_json(text)
+    if history.schema_version > HISTORY_SCHEMA_VERSION:
+        raise ValueError(
+            f"history schema_version {history.schema_version} is not supported (this version "
+            f"reads up to {HISTORY_SCHEMA_VERSION}); update endurance-planner"
+        )
+    return history

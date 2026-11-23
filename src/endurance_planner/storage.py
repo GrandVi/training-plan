@@ -4,6 +4,7 @@
                                   services (save_profile refuses to replace an existing file)
     <data_dir>/plans/<id>.json    one file per plan
     <data_dir>/current            id of the current plan
+    <data_dir>/history.json       completed activities and wellness (written by sync)
     <data_dir>/.lock              lock file: one writer at a time
 
 Every write goes to a temporary file in the same folder that is then renamed over the
@@ -21,10 +22,18 @@ from typing import IO
 import yaml
 
 from endurance_planner.files import write_text_atomic
+from endurance_planner.models.history import History
 from endurance_planner.models.plan import Plan
 from endurance_planner.models.profile import Profile
 from endurance_planner.schemas import schema_header
-from endurance_planner.serialization import ProfileError, dump_plan, parse_plan, parse_profile
+from endurance_planner.serialization import (
+    ProfileError,
+    dump_history,
+    dump_plan,
+    parse_history,
+    parse_plan,
+    parse_profile,
+)
 from endurance_planner.services import PlanNotFound, StorageBusy
 
 PLAN_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,99}$")
@@ -125,6 +134,22 @@ class FileStorage:
         return sorted(
             path.stem for path in self.plans_dir.glob("*.json") if PLAN_ID.match(path.stem)
         )
+
+    # ------------------------------------------------------------------ history
+    @property
+    def history_path(self) -> Path:
+        return self.data_dir / "history.json"
+
+    def load_history(self) -> History:
+        """history.json, or an empty history before the first sync."""
+        try:
+            text = self.history_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return History()
+        return parse_history(text)
+
+    def save_history(self, history: History) -> None:
+        write_text_atomic(self.history_path, dump_history(history))
 
     # ------------------------------------------------------------------ lock
     @contextmanager

@@ -28,6 +28,7 @@ from endurance_planner.export.intervals_icu import IntervalsClient, IntervalsErr
 from endurance_planner.models.enums import BikeActivity, Equipment, Intent, Scope, Sport
 from endurance_planner.periodization import PlanningError
 from endurance_planner.replan import ReplanError
+from endurance_planner.review import PlanReview
 from endurance_planner.rules import DEFAULT_SCOPE
 from endurance_planner.serialization import ProfileError
 from endurance_planner.services import (
@@ -37,6 +38,7 @@ from endurance_planner.services import (
     PlanOverview,
     ProfileSummary,
     PushReport,
+    SyncReport,
     WeekView,
 )
 from endurance_planner.settings import intervals_settings
@@ -143,6 +145,11 @@ class PushBody(_Body):
     start: dt.date | None = Field(None, alias="from")
     end: dt.date | None = Field(None, alias="to")
     absolute_targets: bool = False
+
+
+class SyncBody(_Body):
+    since: dt.date | None = Field(None, description="First day to read (default: see README)")
+    dry_run: bool = Field(False, description="Read and report, store nothing")
 
 
 class Health(BaseModel):
@@ -426,6 +433,24 @@ def create_app(
                 force=body.force,
             )
         )
+
+    @app.post("/history/sync", response_model=SyncReport, tags=["intervals.icu"])
+    def sync_history(body: SyncBody, _: Auth) -> SyncReport:
+        """Read completed activities and wellness from intervals.icu into the history
+        (idempotent by activity id: syncing twice changes nothing)."""
+        try:
+            return service.sync_history(today(), since=body.since, dry_run=body.dry_run)
+        except ValueError as exc:
+            if "not configured" in str(exc):
+                raise ApiError(503, "intervals_not_configured", str(exc)) from exc
+            raise
+
+    @app.get("/plan/review", response_model=PlanReview, tags=["plan"])
+    def plan_review(_: Auth, week: int | None = None, since: dt.date | None = None) -> PlanReview:
+        """Planned vs actual per week, from the history (`week` 1-based, or `since` a date)."""
+        if week is not None and since is not None:
+            raise ApiError(422, "invalid_request", "give week or since, not both")
+        return service.review(today(), week=week, since=since)
 
     @app.post("/plan/push", response_model=PushReport, tags=["intervals.icu"])
     def push(body: PushBody, _: Auth) -> PushReport:

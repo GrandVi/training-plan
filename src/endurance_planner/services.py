@@ -23,8 +23,10 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from endurance_planner import amend as amend_lib
+from endurance_planner import history as history_lib
 from endurance_planner import planner, validation
 from endurance_planner import replan as replan_lib
+from endurance_planner import review as review_lib
 from endurance_planner.export import intervals_icu
 from endurance_planner.export.markdown import (
     fitness_csv,
@@ -48,6 +50,7 @@ from endurance_planner.models.enums import (
     Sport,
     StepKind,
 )
+from endurance_planner.models.history import History
 from endurance_planner.models.issues import Issue
 from endurance_planner.models.plan import (
     Amendment,
@@ -68,6 +71,7 @@ from endurance_planner.zones import zone_set, zone_tables
 
 PlanFormat = Literal["md", "csv", "fitness-csv"]
 FORMATS: tuple[str, ...] = ("md", "csv", "fitness-csv")
+ReviewFormat = Literal["md", "csv"]
 
 
 # ---------------------------------------------------------------------- errors
@@ -353,6 +357,37 @@ class AmendmentView(BaseModel):
     reason: str
     force: bool
     line: str  # as printed by `plan amendments`
+
+
+class SyncReport(BaseModel):
+    """What `sync` read from intervals.icu and what changed in history.json."""
+
+    dry_run: bool
+    start: dt.date
+    end: dt.date
+    activities: int  # activities read
+    added: int
+    updated: int
+    unchanged: int
+    wellness_days: int  # wellness days added or changed
+    unreadable: int  # records without an id or a date (skipped)
+    categories: dict[str, int]  # bike, run, strength, other
+    unknown_types: dict[str, int]  # activity types that map to no category, with counts
+    stored: int  # observations in history.json after the sync
+
+    def lines(self) -> list[str]:
+        cats = ", ".join(f"{name} {count}" for name, count in sorted(self.categories.items()))
+        lines = [
+            f"{self.start} to {self.end}: {self.activities} activities ({cats or 'none'}), "
+            f"{self.added} new, {self.updated} updated, {self.unchanged} unchanged; "
+            f"{self.wellness_days} wellness day(s) new or changed; {self.stored} stored",
+        ]
+        if self.unknown_types:
+            other = ", ".join(f"{name} x{count}" for name, count in self.unknown_types.items())
+            lines.append(f"other activity types (kept, reviewed as 'other'): {other}")
+        if self.unreadable:
+            lines.append(f"{self.unreadable} record(s) without an id or a date were skipped")
+        return lines
 
 
 class PushReport(BaseModel):
@@ -971,6 +1006,63 @@ def push_plan(
     return report
 
 
+# ---------------------------------------------------------------------- history (F7)
+def sync_history(
+    history: History,
+    client: intervals_icu.IntervalsClient,
+    today: dt.date,
+    *,
+    since: dt.date | None = None,
+    dry_run: bool = False,
+) -> tuple[History, SyncReport]:
+    """Read activities and wellness from intervals.icu and merge them into the history
+    (idempotent by activity id). Returns the merged history (the input one on a dry run)."""
+    start = history_lib.sync_window(history, today, since)
+    parsed = history_lib.parse_records(
+        client.list_activities(start, today), client.list_wellness(start, today)
+    )
+    merged, counts = history_lib.merge_history(
+        history, parsed.observations, parsed.wellness, synced=today
+    )
+    report = SyncReport(
+        dry_run=dry_run,
+        start=start,
+        end=today,
+        activities=len(parsed.observations),
+        added=counts.added,
+        updated=counts.updated,
+        unchanged=counts.unchanged,
+        wellness_days=counts.wellness,
+        unreadable=parsed.unreadable,
+        categories=dict(sorted(parsed.categories.items())),
+        unknown_types=dict(sorted(parsed.unknown_types.items())),
+        stored=len(merged.observations),
+    )
+    return (history if dry_run else merged), report
+
+
+def review_plan(
+    plan: Plan,
+    history: History,
+    today: dt.date,
+    *,
+    week: int | None = None,
+    since: dt.date | None = None,
+) -> review_lib.PlanReview:
+    """Planned vs actual per week (review.review_plan)."""
+    if week is not None and not 1 <= week <= len(plan.weeks):
+        raise UnknownWeek(f"no week {week}: the plan has weeks 1 to {len(plan.weeks)}")
+    return review_lib.review_plan(plan, history, today, week=week, since=since)
+
+
+def render_review(result: review_lib.PlanReview, fmt: str = "md") -> str:
+    if fmt == "md":
+        return review_lib.review_markdown(result)
+    if fmt == "csv":
+        return review_lib.review_csv(result)
+    raise UnknownFormat(f"unknown review format {fmt!r}: use md or csv")
+
+
 # ---------------------------------------------------------------------- storage
 class Storage(Protocol):
     """Where the profile and the plans live (see storage.FileStorage)."""
@@ -988,6 +1080,12 @@ class Storage(Protocol):
         ...
 
     def list_plan_ids(self) -> list[str]: ...
+
+    def load_history(self) -> History:
+        """The history of completed activities (empty before the first sync)."""
+        ...
+
+    def save_history(self, history: History) -> None: ...
 
     def lock(self) -> AbstractContextManager[None]:
         """Exclusive lock for a read-modify-write; StorageBusy if it cannot be taken."""
@@ -1158,6 +1256,28 @@ class PlannerService:
                 force=force,
             )
         )
+
+    def sync_history(
+        self, today: dt.date, since: dt.date | None = None, dry_run: bool = False
+    ) -> SyncReport:
+        if self.client_factory is None:
+            raise ValueError("intervals.icu is not configured on this server")
+        with self.storage.lock():
+            client = self.client_factory()
+            try:
+                merged, report = sync_history(
+                    self.storage.load_history(), client, today, since=since, dry_run=dry_run
+                )
+            finally:
+                client.close()
+            if not dry_run:
+                self.storage.save_history(merged)
+        return report
+
+    def review(
+        self, today: dt.date, week: int | None = None, since: dt.date | None = None
+    ) -> review_lib.PlanReview:
+        return review_plan(self.plan(), self.storage.load_history(), today, week=week, since=since)
 
     def push(self, today: dt.date, request: PushRequest) -> PushReport:
         plan, profile = self.plan(), self.storage.load_profile()

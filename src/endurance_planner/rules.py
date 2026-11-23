@@ -189,3 +189,17 @@ def break_return(
         if back < len(caps):
             return BreakReturn(caps[back], back + 1, gap)
     return None
+
+
+# --- activity history and plan review (F7) -------------------------------------------
+# Intensity factor assumed for an activity that comes without a load or an intensity
+# (its TSS is then duration x IF^2; strength uses load.STRENGTH_TSS_PER_HOUR).
+ACTIVITY_DEFAULT_IF = {"bike": 0.70, "run": 0.80, "other": 0.60}
+# `sync` without --since: this many days back for an empty history, else from the last
+# synced day minus SYNC_OVERLAP_DAYS (activities edited since are read again).
+SYNC_FIRST_DAYS = 28
+SYNC_OVERLAP_DAYS = 7
+# Review: an activity is hard at this intensity factor or above; the first REVIEW_LOW_ZONES
+# zones of its time in zones count as low intensity (below LT1).
+REVIEW_HARD_IF = 0.85
+REVIEW_LOW_ZONES = 2

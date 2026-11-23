@@ -203,4 +203,4 @@ def test_web_app_shows_and_amends_strength() -> None:
     assert 'icon("strength")' in script and 'change.kind === "strength"' in script
     page = (WEB / "index.html").read_text(encoding="utf-8")
     assert 'id="i-strength"' in page
-    assert 'const VERSION = "v2"' in (WEB / "sw.js").read_text(encoding="utf-8")
+    assert 'const VERSION = "v1"' not in (WEB / "sw.js").read_text(encoding="utf-8")

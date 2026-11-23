@@ -692,6 +692,103 @@ function showPush() {
   render("Push to intervals.icu", "push", h("p", { class: "muted", text: "Nothing is sent before you confirm." }), form, slot);
 }
 
+function hours(seconds) {
+  return `${(seconds / 3600).toFixed(1)} h`;
+}
+
+const KEY_STATUS = { done: "done", partial: "partly done", missed: "missed", upcoming: "to come" };
+
+function reviewCard(week) {
+  const cat = week.by_category;
+  const done = week.keys.filter((key) => key.status === "done").length;
+  const parts = [
+    `${hours(week.total.planned_s)} planned · ${hours(week.total.actual_s)} done`,
+    `${Math.round(week.total.planned_tss)} / ${Math.round(week.total.actual_tss)} TSS`,
+  ];
+  const detail = [
+    `Ride ${hours(cat.bike.planned_s)} / ${hours(cat.bike.actual_s)}`,
+    `Run ${hours(cat.run.planned_s)} / ${hours(cat.run.actual_s)}`,
+  ];
+  if (cat.strength.planned_s || cat.strength.actual_s) {
+    detail.push(`Strength ${Math.round(cat.strength.planned_s / 60)} / ${Math.round(cat.strength.actual_s / 60)} min`);
+  }
+  if (cat.other.actual_s) detail.push(`Other ${hours(cat.other.actual_s)}`);
+  const facts = [
+    `Key sessions ${done}/${week.keys.length}${week.missed_keys ? `, ${week.missed_keys} missed` : ""}`,
+    `hard ${week.planned_hard} planned / ${week.actual_hard} done`,
+  ];
+  if (week.low_share !== null) facts.push(`${Math.round(week.low_share * 100)}% easy`);
+  const other = Object.entries(week.other_types).map(([name, count]) => `${name} ×${count}`);
+  return h(
+    "li",
+    {},
+    h("h2", { text: `Week ${week.index} · ${week.phase}${week.recovery ? ", recovery" : ""}${week.finished ? "" : " (in progress)"}` }),
+    h("p", { class: "summary" }, parts.map((text) => h("span", { text }))),
+    h("p", { class: "summary" }, detail.map((text) => h("span", { text }))),
+    h("p", { text: facts.join(" · ") }),
+    other.length ? h("p", { class: "muted", text: `Other activities (not in the plan's sports): ${other.join(", ")}` }) : null,
+    week.keys.length
+      ? h(
+          "ul",
+          {},
+          week.keys.map((key) =>
+            h(
+              "li",
+              {},
+              `${formatDay(key.date)} ${SPORT[key.sport] || key.sport} · ${key.name} `,
+              h("span", { class: `badge ${key.status}`, text: KEY_STATUS[key.status] || key.status }),
+              key.status === "upcoming" ? null : ` ${Math.round(key.completion * 100)}%`,
+            ),
+          ),
+        )
+      : null,
+  );
+}
+
+function syncLines(data) {
+  const cats = Object.entries(data.categories).map(([name, count]) => `${name} ${count}`).join(", ");
+  const lines = [
+    `${data.activities} activities read (${cats || "none"}) from ${formatDay(data.start)} to ${formatDay(data.end)}: ${data.added} new, ${data.updated} updated, ${data.unchanged} unchanged.`,
+  ];
+  const unknown = Object.entries(data.unknown_types).map(([name, count]) => `${name} ×${count}`);
+  if (unknown.length) lines.push(`Other activity types kept: ${unknown.join(", ")}.`);
+  return lines;
+}
+
+async function showReview(synced = null) {
+  await overview();
+  const { data: review, cached } = await get("/plan/review");
+  setOffline(cached);
+  const result = h("div", { attrs: { "aria-live": "polite" } });
+  if (synced) {
+    result.append(h("section", { class: "preview", attrs: { "aria-label": "Sync result" } }, syncLines(synced).map((text) => h("p", { text }))));
+  }
+  const sync = h("button", { type: "button", text: "Sync from intervals.icu" });
+  sync.addEventListener("click", async () => {
+    sync.disabled = true;
+    result.replaceChildren(h("p", { class: "muted", text: "Reading activities…" }));
+    try {
+      const { data } = await post("/history/sync", {});
+      say(`Synced: ${data.added} new, ${data.updated} updated activities.`);
+      state.freshStatus = true;
+      await showReview(data);
+    } catch (error) {
+      result.replaceChildren(errorBox(error));
+      sync.disabled = false;
+    }
+  });
+  const weeks = [...review.weeks].reverse();
+  render(
+    "Planned vs done",
+    "review",
+    h("p", { class: "muted", text: review.synced ? `Last sync: ${formatDay(review.synced)}.` : "No activity read yet: sync from intervals.icu first." }),
+    h("div", { class: "actions" }, sync),
+    result,
+    weeks.length ? h("ul", { class: "review" }, weeks.map(reviewCard)) : h("p", { class: "muted", text: "The plan has not started yet." }),
+    review.outside ? h("p", { class: "muted", text: `${review.outside} activities fall outside the plan's weeks.` }) : null,
+  );
+}
+
 async function showAmendments() {
   await overview();
   const { data: amendments, cached } = await get("/plan/amendments");
@@ -741,6 +838,7 @@ const ROUTES = [
   [/^#\/change\/(\d{4}-\d{2}-\d{2})$/, (m) => showChange(m[1])],
   [/^#\/strength\/(\d{4}-\d{2}-\d{2})$/, (m) => showStrength(m[1])],
   [/^#\/change-strength\/(\d{4}-\d{2}-\d{2})$/, (m) => showChangeStrength(m[1])],
+  [/^#\/review$/, () => showReview()],
   [/^#\/unavailable$/, () => showUnavailable()],
   [/^#\/push$/, () => showPush()],
   [/^#\/amendments$/, () => showAmendments()],

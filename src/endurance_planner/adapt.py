@@ -14,22 +14,12 @@ activity reading and the rules of the roadmap's F8 remain.
 """
 
 import datetime as dt
-from dataclasses import dataclass
 
-from endurance_planner.models.enums import Sport
+from endurance_planner.models.history import DayObservation
 from endurance_planner.models.plan import Plan
 from endurance_planner.models.profile import Profile
 
-
-@dataclass(frozen=True)
-class DayObservation:
-    """What happened on one day."""
-
-    date: dt.date
-    sport: Sport | None = None  # None = rest day or wellness-only record
-    duration_s: int = 0
-    tss: float = 0.0
-    readiness: float | None = None  # e.g. HRV- or sleep-based score, 0-1
+__all__ = ["DayObservation", "adjust_plan"]
 
 
 def adjust_plan(

@@ -240,6 +240,40 @@ replan never touches a pinned session. A fresh `plan generate` starts clean. The
 not change, so unchanged sessions keep their intervals.icu event and `push` only updates the
 differences.
 
+## What was actually done: `sync` and `plan review`
+
+`sync` reads the completed activities and the wellness records from intervals.icu into
+`history.json`; `plan review` compares the plan with them, week by week.
+
+    endurance-planner sync                          # default window: see below
+    endurance-planner sync --since 2026-11-16 --dry-run
+    endurance-planner plan review plan.json         # weeks started so far, Markdown
+    endurance-planner plan review plan.json --week 3 -f csv
+    endurance-planner plan review plan.json --since 2026-12-01
+
+- **Sync** is idempotent: activities are matched by their intervals.icu id; reading the same
+  window twice changes nothing, an edited activity is updated, and nothing already stored is
+  dropped. Without `--since` it reads from 7 days before the last sync (28 days back the
+  first time) to today. The summary lists the activities by category and the unknown types.
+- **Activity types**: Ride, VirtualRide, GravelRide, MountainBikeRide and EBikeRide are bike;
+  Run, TrailRun and VirtualRun are run; WeightTraining is strength; every other type (Swim,
+  Yoga...) is kept as `other`, counted in the sync summary and shown in the review.
+- **Each activity** keeps its id, date, type, moving time, load (`icu_training_load`, else
+  duration x IF² from `icu_intensity`, else a default IF per category; strength uses 35 TSS
+  per hour), intensity factor and time in zones when given.
+- **Review** per week: planned vs actual hours and TSS (total, bike, run, strength, other),
+  each key session's completion (same sport, same day; done at 80% of its planned time),
+  missed keys, hard sessions planned vs done (IF 0.85 or more), and the real share of easy
+  time (zones 1-2) when the activities carry time in zones. Planned includes strength
+  sessions; actual includes every activity.
+
+Sample (`plan review` on the recorded test fixtures, today 2026-11-26):
+
+    | Wk | Start | Phase | Hours plan/done | TSS plan/done | Bike h | Run h | Strength min | Keys done | Missed | Hard plan/done | Low % | Other |
+    |---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+    | 1 | 2026-11-16 | base | 6.3 / 7.0 | 306 / 348 | 4.5 / 4.2 | 1.8 / 1.9 | 0 / 25 | 1/1 | 0 | 1 / 1 | 86 | Swim x1 |
+    | 2 | 2026-11-23 | base | 6.7 / 2.2 | 339 / 106 | 4.5 / 0.8 | 2.2 / 0.4 | 0 / 0 | 0/1 | 0 | 1 / 1 | - | Yoga x1 |
+
 ## Using it from several devices
 
 The planner runs on one machine (a Raspberry Pi at home) and is used from a laptop and an
@@ -369,6 +403,8 @@ and the plans (`plans/`, written by the server).
 | `POST /plan/replan` | Rebuild from today after a profile edit |
 | `GET /plan/amendments` | The amendment log |
 | `POST /plan/amendments/{id}/undo` | Remove an amendment and replan |
+| `POST /history/sync` | Read completed activities and wellness into the history (`since`, `dry_run`) |
+| `GET /plan/review` | Planned vs actual per week (`week` or `since` query parameters) |
 | `POST /plan/push` | Push to intervals.icu (`dry_run` true by default, `from`, `to`, `absolute_targets`) |
 | `GET /openapi.json` | OpenAPI description (token required; there is no Swagger UI, it would load from a CDN) |
 
@@ -438,7 +474,10 @@ Sample dry run (example profile, abbreviated):
   (dry run: changes with their reason, warnings, broken rules) always comes first; then
   Confirm (or "Apply anyway" after ticking a box, when a rule is broken). Follow-on changes
   of later weeks are folded under one line.
-- **Unavailable**: a date range with no training or limited minutes per sport, preview first.
+- **Review**: planned vs done, latest week first (hours, TSS, ride / run / strength / other,
+  key sessions with their status, hard sessions, share of easy time), and "Sync from
+  intervals.icu".
+- **Time off**: a date range with no training or limited minutes per sport, preview first.
 - **Push**: preview of the workouts to send (nothing is sent), then "Send to intervals.icu".
 - **Changes**: the amendment log, with Undo (preview first) on active amendments.
 - **Settings**: thresholds and profile warnings, replan or new plan (preview first),
@@ -576,9 +615,10 @@ Zwift / FIT files are not generated here: intervals.icu can export them from the
 
 ## Limits
 
-- The plan does not read what you actually do: tell it with `plan amend`, `plan unavailable`
-  or `plan replan` (sessions dated before today are taken as done). Reading completed
-  activities is a future step (`adapt.py`).
+- `sync` and `plan review` read what you actually did; `plan replan` still takes the sessions
+  dated before today as done (adapting the plan from the history is `plan adapt`).
+- Key sessions are matched by date and sport only: a key run done the next day, or on the
+  bike, counts as missed.
 - After an amendment, later weeks are rebuilt from the real (lower) history: their caps can
   only go down, but their mix can change within them (for example shorter long runs leave
   run volume for a key session that did not fit before).
@@ -691,6 +731,25 @@ Strength sessions (F10):
   the CTL/ATL/TSB projection and the event load only.
 - UNVERIFIED intervals.icu fields: `moving_time` (planned duration, seconds) and
   `icu_training_load` (planned load) on a `WeightTraining` event; no real call was made.
+
+Activity history and review (F7):
+- Activity fields used: `id`, `type`, `start_date_local` (its first 10 characters are the
+  date), `moving_time` (else `elapsed_time`), `icu_training_load`, `icu_intensity` (IF in %;
+  a value of 3 or less is read as a fraction), `name`.
+- UNVERIFIED intervals.icu field names (no `doctor` run): time in zones `icu_zone_times`
+  (power, a list of `{"id", "secs"}`), `pace_zone_times` and `icu_hr_zone_times` (lists of
+  seconds); wellness date `id` (or `date`), `hrv` (or `hrvRMSSD`), `restingHR`, `sleepSecs`,
+  `sleepScore`, `ctl`, `atl`. Missing, null, negative or non-numeric values are ignored; a
+  record is skipped (and counted) only without an id or a date. Other wellness fields are
+  ignored.
+- Default IF when an activity has neither load nor intensity: bike 0.70, run 0.80, other
+  0.60 (`rules.ACTIVITY_DEFAULT_IF`); such loads are flagged `tss_estimated`.
+- Time in zones: power for rides, pace for runs, else heart rate; the first two zones count
+  as easy (`rules.REVIEW_LOW_ZONES`), whatever zone model intervals.icu uses.
+- `history.json` lives next to the plan for the CLI (`--history`) and in the data directory
+  for the API. It has no revision: a sync is an idempotent merge done under the storage lock.
+- The review covers the weeks that have started (`--week` and `--since` select others); a
+  key session dated today or later without an activity is "upcoming", not missed.
 
 Tooling:
 - `mypy` checks against the running interpreter (no pinned `python_version`); `ruff` targets 3.11.
@@ -857,7 +916,7 @@ before schema v2 (the example plan and a digest of each property-test plan), and
 strength feature, so a change of behaviour shows up as a failing test. Layout:
 
     src/endurance_planner/
-      models/          profile, plan, enums, issues (pydantic)
+      models/          profile, plan, history, enums, issues (pydantic)
       config.py        profile loading          thresholds.py   threshold resolution
       zones.py         zone models and tables   targets.py      relative -> absolute targets
       load.py          TSS, low/high split, CTL/ATL/TSB
@@ -865,6 +924,8 @@ strength feature, so a change of behaviour shows up as a failing test. Layout:
       periodization.py templates.py specificity.py scheduler.py planner.py
       swap.py          validation.py            adapt.py (future hook)
       strength.py      exercise library, strength ladders, placement of strength sessions
+      history.py       activities and wellness from intervals.icu (parse, merge)
+      review.py        planned vs actual per week (Markdown, CSV)
       replan.py        rebuild a running plan   amend.py        amendments (pure functions)
       export/          json_io (plan files), markdown (+ CSV), intervals_icu
       schemas.py       JSON Schemas (committed copies in schemas/)

@@ -320,6 +320,22 @@ class IntervalsClient:
         assert isinstance(data, list)
         return data
 
+    def list_activities(self, oldest: dt.date, newest: dt.date) -> list[dict[str, Any]]:
+        """Completed activities between oldest and newest (inclusive), as returned."""
+        params = {"oldest": oldest.isoformat(), "newest": newest.isoformat()}
+        data = self._request("GET", "/activities", params=params).json()
+        if not isinstance(data, list):
+            raise IntervalsError("intervals.icu returned no activity list")
+        return [item for item in data if isinstance(item, dict)]
+
+    def list_wellness(self, oldest: dt.date, newest: dt.date) -> list[dict[str, Any]]:
+        """Wellness records between oldest and newest (inclusive), as returned."""
+        params = {"oldest": oldest.isoformat(), "newest": newest.isoformat()}
+        data = self._request("GET", "/wellness", params=params).json()
+        if not isinstance(data, list):
+            raise IntervalsError("intervals.icu returned no wellness list")
+        return [item for item in data if isinstance(item, dict)]
+
     def delete_events(self, event_ids: list[int]) -> None:
         if event_ids:
             body = [{"id": event_id} for event_id in event_ids]
