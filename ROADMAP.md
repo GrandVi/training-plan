@@ -1,7 +1,7 @@
-# Roadmap: next features (M7 to M10)
+# Roadmap: next features (M8 to M11)
 
-Status: proposal v2, 2026-11-19 (flexible calendar added). Baseline: M1 to M6 delivered
-(commit `ee43cfa`).
+Status: proposal v3, 2026-11-23 (strength training moved up). Baseline: M1 to M6, M7 (F1 to F3)
+and the Portability work (service layer, API, web app) are delivered (commit `e2fb061`).
 
 Working rules are unchanged: one commit per feature (a milestone groups several), `pytest`,
 `ruff` and `mypy` green, deterministic generation, rules and templates as data, no logic in the
@@ -13,20 +13,21 @@ Each feature closes a gap listed in the README "Limits" section, or a risk the R
 
 | # | Feature | Gap it closes | Size | Milestone |
 |---|---|---|---|---|
-| F1 | Foundations: CI, JSON Schema, plan schema v2 | No CI, no editor help, schema is v1 | S | M7 |
-| F2 | Planned calendar exceptions (known in advance) | Availability is one fixed weekly pattern | M | M7 |
-| F3 | Plan amendments and replanning (changes along the way) | An in-progress plan cannot be changed or regenerated | L | M7 |
-| F4 | Races on the calendar + race-day form check | "Races are not sessions" | S | M8 |
-| F5 | Threshold tests + `profile record-test` | Stale thresholds only raise a warning | M | M8 |
-| F6 | `doctor`: live check of the intervals.icu integration | "No real call was made to the service" | S | M9 |
-| F7 | Activity sync + `plan review` (planned vs actual) | Load is planned, never measured | M | M9 |
-| F8 | `plan adapt`: rebuild the remaining weeks from what was done | "The plan is not adapted to what you actually do" | M | M9 |
-| F9 | New goal types + vertical-gain-aware long sessions | Elevation ignored; no marathon, trail or gran fondo | M | M10 |
-| F10 | Strength sessions | "No strength work" | M | M10 |
+| F1 | Foundations: CI, JSON Schema, plan schema v2 | No CI, no editor help, schema is v1 | S | M7 (done) |
+| F2 | Planned calendar exceptions (known in advance) | Availability is one fixed weekly pattern | M | M7 (done) |
+| F3 | Plan amendments and replanning (changes along the way) | An in-progress plan cannot be changed or regenerated | L | M7 (done) |
+| F4 | Races on the calendar + race-day form check | "Races are not sessions" | S | M9 |
+| F5 | Threshold tests + `profile record-test` | Stale thresholds only raise a warning | M | M9 |
+| F6 | `doctor`: live check of the intervals.icu integration | "No real call was made to the service" | S | M10 |
+| F7 | Activity sync + `plan review` (planned vs actual) | Load is planned, never measured | M | M10 |
+| F8 | `plan adapt`: rebuild the remaining weeks from what was done | "The plan is not adapted to what you actually do" | M | M10 |
+| F9 | New goal types + vertical-gain-aware long sessions | Elevation ignored; no marathon, trail or gran fondo | M | M11 |
+| F10 | Strength sessions (equipment-aware, winter-ready) | "No strength work" | M | M8 |
 
-Order: M7 comes first because real life breaks plans and the replanning engine built in F3 is
-reused by F8. M8 is offline and deterministic. M9 needs a real intervals.icu account. M10 widens
-the training content once the plan can follow reality.
+Order: M7 and the Portability work are delivered. M8 (strength) comes next because winter is
+the season where it helps most and where outdoor sessions are fewer. M9 is offline and
+deterministic. M10 needs a real intervals.icu account and reuses the replanning engine built in
+F3. M11 widens the goal types once the plan can follow reality.
 
 ---
 
@@ -174,7 +175,74 @@ through `replan`, `amend` and `unavailable`.
 
 ---
 
-## M8: Race readiness (offline)
+## M8: Strength training
+
+### F10. Strength sessions
+
+**Why.** Strength work is standard in a running and MTB plan, is most practical in winter, and
+is entirely absent today.
+
+**What.**
+- Profile (default 0 sessions keeps every current plan unchanged):
+
+      availability:
+        strength:
+          sessions_per_week: 2          # maximum; 0 = off
+          minutes: 40                   # 20 to 60
+          allow_extra_days: false       # true = may use a rest day
+          equipment: [bodyweight, dumbbells, barbell]   # this is the default
+
+  Equipment values: `bodyweight` (always available), `dumbbells`, `barbell`, `kettlebell`,
+  `bands`, `pullup_bar`, `machines`. The default list is bodyweight, dumbbells and barbell.
+- F2 exceptions accept an optional `equipment` list for their dates (for example a trip with
+  `equipment: [bodyweight]`), and `plan amend` can change the equipment of one session.
+- Separate model `Week.strength: list[StrengthSession]` instead of a new `Sport`, so the many
+  per-sport loops and the ramp logic stay untouched.
+- Exercise library as data (`strength.py`): id, name, movement pattern (squat, hinge,
+  single-leg, push, pull, calf, core), required equipment (any of), unilateral flag, and a
+  one-line rationale. The scheduler picks, for each pattern, the first exercise whose equipment
+  is available, so the same plan degrades cleanly to bodyweight. Barbell and dumbbell squats,
+  Romanian deadlifts, split squats and step-ups, presses and rows are the core of the library;
+  no jumps or plyometrics by default (run impact), and none at all when `athlete.injury_notes`
+  is set.
+- Prescription as sets x reps at a target reps in reserve (RIR), not a percentage of a 1RM the
+  athlete never measured. Each template has a ladder like the interval templates:
+  - Base: foundation, 2 to 3 sets of 10 to 15 reps at RIR 3 to 4, 2 sessions a week;
+  - Build: heavier, 3 to 5 sets of 4 to 8 reps at RIR 1 to 3, 2 sessions a week;
+  - Peak: maintenance, 1 session, 1 to 2 heavy sets per pattern;
+  - Taper and transition: 1 light session, none in the last 3 days before an A race;
+  - Recovery weeks: volume reduced by about 40%.
+  A table in `strength.py` gives the sessions per phase; the profile value is a cap.
+- Placement rules: on a training day after an easy endurance session, or on a rest day only if
+  `allow_extra_days`; never the day before a hard or long session, and never on the day of one.
+  Strength minutes count in `weekly_hours_budget` but not in the TSS ramp caps.
+- Load: a flat estimate (`STRENGTH_TSS_PER_HOUR`, default 35, tunable) is added to the CTL/ATL/TSB
+  projection and pushed as the event load, so the intervals.icu forecast is not distorted. It
+  never enters the ramp caps.
+- Export: intervals.icu type `WeightTraining` (new `ActivityType`), exercises as plain text in
+  the description (the workout text syntax has no sets and reps), same idempotent
+  `external_id` with a `strength` slot.
+- Amendments (F3): shorten (accessory exercises are dropped first), skip, move, change equipment.
+  A skipped or shortened-below-80% session holds its ladder rung.
+- Services, API and web app: `show_week` and the week and session responses include strength
+  sessions; the web week view shows them; the amend form works on them.
+
+**Done when.**
+- Placement, phase, equipment and race-proximity rules each have a validation check and a
+  tampering test.
+- The property tests draw `sessions_per_week` 0 to 3 and random equipment lists (bodyweight
+  always present): every plan passes `validate_plan`, every exercise uses only available
+  equipment, and with 0 sessions plans are identical to before.
+- Winter scenario: a 12-week Base block with the default equipment gives 2 sessions a week, never
+  before a hard or long session, none within 3 days of the A race.
+- Mocked-HTTP tests cover the `WeightTraining` payload and idempotent upsert; the API and web
+  tests cover display and amendment of a strength session.
+- README: new section, commands, Assumptions; the "no strength work" limit is removed. The
+  disclaimer stays: generic strength guidance, no injury advice.
+
+---
+
+## M9: Race readiness (offline)
 
 ### F4. Races on the calendar and race-day form
 
@@ -223,7 +291,7 @@ and after a test the profile and the plan are updated by hand.
 
 ---
 
-## M9: Closing the loop with intervals.icu
+## M10: Closing the loop with intervals.icu
 
 ### F6. `doctor`: live check of the integration
 
@@ -304,7 +372,7 @@ observed history instead of the planned past.
 
 ---
 
-## M10: Broader training content
+## M11: Broader goal types
 
 ### F9. New goal types and vertical gain
 
@@ -326,27 +394,6 @@ exists for running and road events.
 
 **Done when.** Each new goal type passes the property test and has a scenario test; the warning
 has a tampering test; load stays based on duration and IF (no grade adjustment yet, see backlog).
-
-### F10. Strength sessions
-
-**Why.** Strength work is standard in a running and MTB plan and is entirely absent.
-
-**What.**
-- Profile: `availability.strength: {sessions_per_week: 0, minutes: 40, allow_extra_days: false}`.
-  Default 0 keeps current plans unchanged.
-- Separate model `Week.strength: list[StrengthSession]` instead of a new `Sport`, so the many
-  per-sport loops and the ramp logic stay untouched. A template (data, with phases and a one-line
-  rationale, like interval templates) lists generic exercises; no injury advice.
-- Phases: foundation in Base, heavier work in Build, one maintenance session in Peak, none in the
-  last 3 days before an A race.
-- Placement rules: on a training day after an easy session, or on a rest day only if
-  `allow_extra_days`; never the day before a hard or long session. Strength minutes count in
-  `weekly_hours_budget` but not in the TSS ramp caps. Amendments (F3) can move or skip them.
-- Export: intervals.icu type `WeightTraining` (new `ActivityType`), text description, same
-  idempotent `external_id` with a `strength` slot.
-
-**Done when.** Placement and phase rules each have a validation check and a tampering test; the
-property test with `sessions_per_week` 1 and 2 passes; `plan show` and the CSV include them.
 
 ---
 
@@ -381,5 +428,8 @@ hook and the history-based scheduler are ready.
   10% drift) are starting values, kept in `rules.py` and calibrated on the property-test
   profiles before release.
 - Wellness gating is opt-in.
-- Strength is outside the ramp caps because it is not aerobic load; it only constrains placement
-  and the time budget.
+- Strength is outside the ramp caps because it is not aerobic load; it constrains placement and
+  the time budget, and a flat estimate (35 TSS per hour, tunable) feeds the CTL projection and
+  the intervals.icu forecast only.
+- Default strength equipment is bodyweight, dumbbells and a barbell; prescriptions use reps in
+  reserve because no 1RM is known; no plyometrics.
