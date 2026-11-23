@@ -1,7 +1,7 @@
 // Service worker: the app shell is cached at install; GET requests of the plan are
 // network-first and fall back to the last copy saved on this device (offline reading).
 // Changes (POST) always go to the network.
-const VERSION = "v1";
+const VERSION = "v2";
 const SHELL_CACHE = `shell-${VERSION}`;
 const DATA_CACHE = `data-${VERSION}`;
 const SHELL = [

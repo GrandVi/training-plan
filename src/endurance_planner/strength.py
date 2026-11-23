@@ -522,9 +522,15 @@ def build_session(request: SessionRequest) -> StrengthSession | None:
     )
 
 
+def exercise_lines(session: StrengthSession) -> list[str]:
+    """One numbered line per exercise ("1. Goblet squat: 3 x 12 reps, 3 reps in reserve")."""
+    return [f"{index}. {exercise.label()}" for index, exercise in enumerate(session.exercises, 1)]
+
+
 def description(session: StrengthSession) -> str:
-    """Plain-text description (intervals.icu workout text has no sets and reps)."""
-    lines = [f"- {exercise.label()}" for exercise in session.exercises]
+    """Plain-text description (intervals.icu workout text has no sets and reps; no line
+    starts with "-", which it would read as a workout step)."""
+    lines = exercise_lines(session)
     if session.equipment_used:
         lines.append("Equipment: " + ", ".join(item.value for item in session.equipment_used))
     return "\n".join([*lines, "", session.rationale])

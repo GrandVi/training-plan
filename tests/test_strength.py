@@ -160,5 +160,6 @@ def test_description_is_plain_text() -> None:
     session = build_session(request(equipment=frozenset({BW})))
     assert session is not None
     text = strength.description(session)
-    assert text.startswith("- Bodyweight squat, 3 s down: 2 x 15 reps, 4 reps in reserve")
+    assert text.startswith("1. Bodyweight squat, 3 s down: 2 x 15 reps, 4 reps in reserve")
+    assert not any(line.startswith("-") for line in text.splitlines())
     assert "Equipment: bodyweight" in text and "not injury advice" in text

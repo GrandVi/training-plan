@@ -15,6 +15,9 @@ Not supported by the text syntax, and how it is handled here:
 - RPE targets: pushed as the equivalent % of threshold, with a note in the description.
 - Nested repeats (over-unders, 30/15 sets): flattened to one level.
 - Absolute HR in bpm is not documented: HR targets stay in % LTHR even with absolute targets.
+- Sets and reps (strength sessions): plain text in the description, type WeightTraining.
+  UNVERIFIED: the planned duration and load are sent as `moving_time` (seconds) and
+  `icu_training_load`, names taken from the activity fields; check them with a real account.
 """
 
 import base64
@@ -25,8 +28,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from endurance_planner.models.enums import Sport, StepKind, TargetKind
-from endurance_planner.models.plan import Plan, Repeat, Session, Step, flatten
+from endurance_planner.load import strength_tss
+from endurance_planner.models.enums import ActivityType, Sport, StepKind, TargetKind
+from endurance_planner.models.plan import Plan, Repeat, Session, Step, StrengthSession, flatten
+from endurance_planner.strength import description as strength_description
 from endurance_planner.thresholds import ResolvedThresholds
 from endurance_planner.transport import Response, Transport, TransportError
 from endurance_planner.units import format_clock
@@ -151,9 +156,14 @@ def plan_prefix(plan_id: str | None = None) -> str:
     return f"{EXTERNAL_ID_PREFIX}:{plan_id}:" if plan_id else f"{EXTERNAL_ID_PREFIX}:"
 
 
-def external_id(plan_id: str, session: Session) -> str:
-    """Stable id (plan + date + slot): pushing again updates the event instead of duplicating."""
-    return f"{plan_prefix(plan_id)}{session.date.isoformat()}:{session.slot.value}"
+STRENGTH_SLOT = "strength"
+
+
+def external_id(plan_id: str, session: Session | StrengthSession) -> str:
+    """Stable id (plan + date + slot): pushing again updates the event instead of duplicating.
+    Strength sessions use the slot `strength`."""
+    slot = STRENGTH_SLOT if isinstance(session, StrengthSession) else session.slot.value
+    return f"{plan_prefix(plan_id)}{session.date.isoformat()}:{slot}"
 
 
 def event_payload(plan_id: str, session: Session, absolute: bool = False) -> dict[str, Any]:
@@ -167,18 +177,44 @@ def event_payload(plan_id: str, session: Session, absolute: bool = False) -> dic
     }
 
 
+def strength_payload(plan_id: str, session: StrengthSession) -> dict[str, Any]:
+    """A strength session as a WeightTraining workout: exercises as plain text, the flat
+    load estimate as the event load (UNVERIFIED field names, see the module docstring)."""
+    return {
+        "category": "WORKOUT",
+        "start_date_local": f"{session.date.isoformat()}T00:00:00",
+        "type": ActivityType.WEIGHT_TRAINING.value,
+        "name": session.name,
+        "description": strength_description(session),
+        "moving_time": session.minutes * 60,
+        "icu_training_load": round(strength_tss(session.minutes)),
+        "external_id": external_id(plan_id, session),
+    }
+
+
 def plan_events(
     plan: Plan,
     start: dt.date | None = None,
     end: dt.date | None = None,
     absolute: bool = False,
 ) -> list[dict[str, Any]]:
-    """Event payloads of the sessions between start and end (inclusive)."""
-    return [
+    """Event payloads of the sessions (then the strength sessions) between start and end
+    (inclusive)."""
+
+    def inside(date: dt.date) -> bool:
+        return (start is None or date >= start) and (end is None or date <= end)
+
+    events = [
         event_payload(plan.id, session, absolute)
         for week in plan.weeks
         for session in week.sessions
-        if (start is None or session.date >= start) and (end is None or session.date <= end)
+        if inside(session.date)
+    ]
+    return events + [
+        strength_payload(plan.id, session)
+        for week in plan.weeks
+        for session in week.strength
+        if inside(session.date)
     ]
 
 

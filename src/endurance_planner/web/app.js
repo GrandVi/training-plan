@@ -87,6 +87,18 @@ function sessionLabel(session) {
   return `${SPORT[session.sport]} ${formatDuration(session.duration_s)} · ${session.name}`;
 }
 
+function strengthLabel(session) {
+  if (!session) return "no strength";
+  return `Strength ${session.minutes} min · ${session.name}`;
+}
+
+function changeLabel(change) {
+  if (change.kind === "strength") {
+    return `${strengthLabel(change.strength_before)} → ${strengthLabel(change.strength_after)}`;
+  }
+  return `${sessionLabel(change.before)} → ${sessionLabel(change.after)}`;
+}
+
 function field(label, input, hint) {
   const id = input.id || `f-${Math.random().toString(36).slice(2, 9)}`;
   input.id = id;
@@ -153,7 +165,7 @@ function changeList(changes) {
         "li",
         {},
         h("span", { class: `code ${change.code}`, text: `${formatDay(change.date)} · ${CHANGE_LABELS[change.code] || words(change.code)}` }),
-        `${sessionLabel(change.before)} → ${sessionLabel(change.after)}`,
+        changeLabel(change),
       ),
     ),
   );
@@ -288,6 +300,31 @@ async function showWeek(index) {
     h("button", { type: "button", class: "secondary", text: "This week", on: { click: () => go(`#/week/${currentWeek(plan)}`) } }),
     h("button", { type: "button", class: "secondary", text: "Next →", disabled: number >= plan.weeks.length, on: { click: () => go(`#/week/${number + 1}`) } }),
   );
+  const strengthCards = (week.strength || []).map((session) =>
+    h(
+      "li",
+      {},
+      h(
+        "a",
+        { class: "card", href: `#/strength/${session.date}` },
+        h(
+          "span",
+          { class: "day" },
+          h("span", { text: formatDay(session.date).split(" ")[0] }),
+          h("span", { class: "date", text: formatShort(session.date) }),
+        ),
+        icon("strength"),
+        h(
+          "span",
+          { class: "name" },
+          h("span", { class: "sr-only", text: "Strength: " }),
+          session.name,
+          session.pinned ? h("span", { class: "badge pinned", text: "changed" }) : null,
+        ),
+        h("span", { class: "meta", text: `${session.minutes} min · strength · ${session.equipment.join(", ") || "bodyweight"}` }),
+      ),
+    ),
+  );
   const cards = week.sessions.map((session) => {
     const badges = [];
     if (session.hard) badges.push(h("span", { class: "badge hard", text: "key" }));
@@ -323,12 +360,119 @@ async function showWeek(index) {
       h("span", { text: `${Math.round(week.tss)} TSS` }),
       h("span", { text: `load ${Math.round(week.load)}` }),
       h("span", { text: `${week.low_pct}% easy` }),
+      week.strength_minutes ? h("span", { text: `+ ${week.strength_minutes} min strength` }) : null,
     ),
     week.races.length ? h("p", { class: "note", text: `Race this week: ${week.races.join(", ")}` }) : null,
     week.exceptions.map((text) => h("p", { class: "note", text: `Calendar: ${text}` })),
     nav,
     cards.length ? h("ul", { class: "cards" }, cards) : h("p", { class: "muted", text: "No session this week." }),
+    strengthCards.length ? [h("h2", { text: "Strength" }), h("ul", { class: "cards" }, strengthCards)] : null,
   );
+}
+
+async function findStrength(date) {
+  const plan = await overview();
+  const number = weekOf(plan, date);
+  if (number < 1 || number > plan.weeks.length) return [null, number];
+  const { data: week, cached } = await get(`/plan/weeks/${number}`);
+  setOffline(cached);
+  return [(week.strength || []).find((s) => s.date === date) || null, number, week];
+}
+
+async function showStrength(date) {
+  const [session, number] = await findStrength(date);
+  if (!session) {
+    render("No strength session", "week", h("p", { text: `There is no strength session on ${formatDay(date)}.` }), h("a", { href: `#/week/${number}`, text: "Back to the week" }));
+    return;
+  }
+  render(
+    session.name,
+    "week",
+    h(
+      "p",
+      { class: "summary" },
+      h("span", { text: formatDay(session.date) }),
+      h("span", { text: "Strength" }),
+      h("span", { text: `${session.minutes} min` }),
+      h("span", { text: `about ${Math.round(session.tss)} TSS` }),
+      h("span", { text: session.equipment.join(", ") || "bodyweight" }),
+    ),
+    session.pinned ? h("p", { class: "note", text: `Changed by amendment ${session.amendment_id}: replans keep it as it is.` }) : null,
+    h("h2", { text: "Exercises" }),
+    h("ol", { class: "steps" }, session.exercises.map((exercise, i) => h("li", { text: session.lines[i].replace(/^\d+\. /, "") }))),
+    h("h2", { text: "Why" }),
+    h("p", { text: session.rationale }),
+    h(
+      "div",
+      { class: "actions" },
+      h("a", { class: "button", href: `#/change-strength/${session.date}`, text: "Change this session" }),
+      h("a", { class: "button secondary", href: `#/week/${number}`, text: "Back to the week" }),
+    ),
+  );
+}
+
+const EQUIPMENT = [
+  ["dumbbells", "Dumbbells"],
+  ["barbell", "Barbell"],
+  ["kettlebell", "Kettlebell"],
+  ["bands", "Bands"],
+  ["pullup_bar", "Pull-up bar"],
+  ["machines", "Machines"],
+];
+
+async function showChangeStrength(date) {
+  const [session, number, week] = await findStrength(date);
+  if (!session) {
+    render("No strength session", "week", h("p", { text: `There is no strength session on ${formatDay(date)}.` }));
+    return;
+  }
+  const minutes = h("input", { type: "number", name: "minutes", min: 20, max: 120, inputMode: "numeric", placeholder: String(session.minutes) });
+  const moveTo = h("input", { type: "date", name: "move_to", min: week.start, max: week.end });
+  const skip = h("input", { type: "checkbox", name: "skip" });
+  const changeEquipment = h("input", { type: "checkbox", name: "change_equipment" });
+  const boxes = EQUIPMENT.map(([value]) => h("input", { type: "checkbox", name: "equipment", value, checked: session.equipment.includes(value), disabled: true }));
+  changeEquipment.addEventListener("change", () => { for (const box of boxes) box.disabled = !changeEquipment.checked; });
+  const reason = h("input", { type: "text", name: "reason", maxLength: 200, autocomplete: "off" });
+  const others = [minutes, moveTo, changeEquipment];
+  skip.addEventListener("change", () => {
+    for (const input of others) input.disabled = skip.checked;
+    for (const box of boxes) box.disabled = skip.checked || !changeEquipment.checked;
+  });
+  const slot = h("div", {});
+  const form = h(
+    "form",
+    {
+      on: {
+        input: () => slot.replaceChildren(),
+        submit: (event) => {
+          event.preventDefault();
+          const data = new FormData(form);
+          const payload = { date, scope: data.get("scope"), reason: reason.value.trim() };
+          if (skip.checked) payload.skip = true;
+          else {
+            if (minutes.value) payload.minutes = Number(minutes.value);
+            if (moveTo.value) payload.move_to = moveTo.value;
+            if (changeEquipment.checked) payload.equipment = boxes.filter((box) => box.checked).map((box) => box.value);
+          }
+          preview(slot, "/plan/strength/amend", payload, () => go(`#/week/${number}`));
+        },
+      },
+    },
+    field("New duration in minutes", minutes, "at least 20; accessory exercises go first"),
+    field("Move to", moveTo, "a day of the same week"),
+    h("label", { class: "choice" }, changeEquipment, "Other equipment for this session"),
+    h(
+      "fieldset",
+      {},
+      h("legend", { text: "Equipment available (bodyweight always)" }),
+      EQUIPMENT.map(([, label], i) => h("label", { class: "choice" }, boxes[i], label)),
+    ),
+    h("label", { class: "choice" }, skip, "Skip this session"),
+    field("Reason", reason, "optional, kept in the log"),
+    radios("Adapt", "scope", [["session", "Only this session"], ["week", "This week"], ["rest", "This week and the rest of the plan"]], "rest"),
+    h("div", { class: "actions" }, h("button", { type: "submit", text: "Preview the change" })),
+  );
+  render(`Change: ${session.name}`, "week", h("p", { class: "muted", text: `${formatDay(session.date)} · ${strengthLabel(session)}` }), form, slot);
 }
 
 async function findSession(date) {
@@ -595,6 +739,8 @@ const ROUTES = [
   [/^#\/week\/(\d+)$/, (m) => showWeek(Number(m[1]))],
   [/^#\/session\/(\d{4}-\d{2}-\d{2})$/, (m) => showSession(m[1])],
   [/^#\/change\/(\d{4}-\d{2}-\d{2})$/, (m) => showChange(m[1])],
+  [/^#\/strength\/(\d{4}-\d{2}-\d{2})$/, (m) => showStrength(m[1])],
+  [/^#\/change-strength\/(\d{4}-\d{2}-\d{2})$/, (m) => showChangeStrength(m[1])],
   [/^#\/unavailable$/, () => showUnavailable()],
   [/^#\/push$/, () => showPush()],
   [/^#\/amendments$/, () => showAmendments()],

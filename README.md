@@ -8,6 +8,8 @@ structured workouts.
 - Deterministic: the same profile and date always give the same plan. No randomness.
 - Every rule is explicit, lives in a data table or a constant, and is checked by `validate_plan()`.
 - A Python core library with a thin CLI on top (no logic in the CLI), ready for a future UI.
+- Optional strength sessions (sets x reps at a target reps in reserve), placed around the
+  endurance work and adapted to the equipment available each day.
 
 Supported goals: `run_5k`, `run_10k`, `run_half_marathon`, `mtb_xc`, `mtb_marathon`,
 `ultra_endurance` (bike or run).
@@ -111,6 +113,62 @@ the plan is generated or replanned:
 - An A goal inside an `off` range is an error; an exception in the 10 days before an A race
   is a warning. `plan show` marks the weeks with an exception (`*`).
 
+### Strength sessions
+
+Off by default (`sessions_per_week: 0`, plans are then exactly as without this feature):
+
+    availability:
+      strength:
+        sessions_per_week: 2          # a cap, 0 to 3; 0 = off
+        minutes: 40                   # 20 to 60, per session
+        allow_extra_days: false       # true: may use a rest day (or go over days_per_week)
+        equipment: [bodyweight, dumbbells, barbell]   # the default
+      exceptions:
+        - {from: 2027-02-16, to: 2027-02-19, mode: limited, minutes: {run: 45},
+           equipment: [bodyweight], note: "hotel"}
+
+Equipment values: `bodyweight` (always available), `dumbbells`, `barbell`, `kettlebell`,
+`bands`, `pullup_bar`, `machines`.
+
+- **Sessions per week by phase** (`strength.SESSIONS_PER_PHASE`, capped by the profile):
+  base 2, build 2, peak 1, taper 1, transition 1. With two sessions a week they alternate
+  A (squat, hinge, push) and B (single-leg, hinge, pull); a single session covers the full
+  body. Calf and core exercises are accessories.
+- **Prescription**: sets x reps at a target reps in reserve (RIR), never a % of a 1RM. Each
+  phase has a ladder that goes one rung up per loading week, like the interval ladders:
+
+  | Phase | Template | Ladder (sets x reps, RIR) |
+  |---|---|---|
+  | Base | `strength_base` | 2x15 RIR 4, 3x15 RIR 4, 3x12 RIR 3, 3x10 RIR 3 |
+  | Build | `strength_build` | 3x8 RIR 3, 4x6 RIR 2, 4x5 RIR 2, 5x4 RIR 1 |
+  | Peak | `strength_peak` | 1x5 RIR 2, 2x4 RIR 2 (maintenance) |
+  | Taper, transition | `strength_light` | 1x8 RIR 4 |
+
+  Recovery weeks repeat the last rung with about 40% fewer sets and one more rep in reserve.
+  Build and peak use the heavier variant of an exercise when its equipment is there (goblet
+  squat -> back squat, step-up -> rear-foot-elevated split squat, push-up -> feet-elevated
+  push-up...).
+- **Exercises** (`strength.LIBRARY`): for each movement pattern the first exercise whose
+  equipment is available that day, so a plan degrades cleanly to bodyweight. No jumps or
+  plyometrics; the higher-impact ones (walking lunge) are left out when
+  `athlete.injury_notes` is set.
+- **Days**: after an easy endurance session, or on another training day of the weekly pattern
+  while the week stays within `days_per_week` (rest days only with `allow_extra_days`); never
+  on or the day before a hard or long session, never on or the day before a race, none in
+  the last 3 days before an A race, and two strength sessions at least 48 h apart. Days after
+  an easy session come first, then the widest spacing.
+- **Time and load**: strength minutes count in `weekly_hours_budget` (the endurance volume
+  leaves room for them), not in the TSS ramp caps. Sessions that do not fit are shortened
+  (accessories first), then dropped, with a warning (`strength_shortened`,
+  `strength_dropped`). A flat estimate of 35 TSS per hour (`load.STRENGTH_TSS_PER_HOUR`)
+  feeds the CTL/ATL/TSB projection and is pushed as the event load.
+- **Checks**: `validate_plan` checks placement (`strength_placement`), phase and prescription
+  (`strength_phase`), equipment and excluded exercises (`strength_equipment`), race proximity
+  (`strength_race_proximity`), the weekly count (`strength_count`) and the budget
+  (`weekly_budget`).
+
+Generic strength guidance only: it is not injury advice. Stop any exercise that hurts.
+
 **Editor support.** The first line of a profile names its JSON Schema:
 
     # yaml-language-server: $schema=../schemas/profile.schema.json
@@ -144,6 +202,13 @@ one line per day with a reason code; `--dry-run` prints them and writes nothing.
     endurance-planner plan replan plan.json
     endurance-planner plan amendments plan.json --undo a2
 
+Strength sessions (`--strength`; `--equipment` implies it):
+
+    endurance-planner plan amend plan.json --date 2026-12-09 --strength --minutes 25   # accessories go first
+    endurance-planner plan amend plan.json --date 2026-12-09 --strength --skip
+    endurance-planner plan amend plan.json --date 2026-12-09 --strength --move-to 2026-12-10
+    endurance-planner plan amend plan.json --date 2026-12-09 --equipment bodyweight,bands  # hotel gym
+
 Common options: `--scope session|week|rest` (default `rest`), `--dry-run`, `--reason TEXT`,
 `--force`. Flags combine, except `--skip`.
 
@@ -163,6 +228,7 @@ How the plan follows (numbers in `rules.py`):
 | Dates | Amendments of past days are refused. A later amendment of the same session supersedes the earlier one (both stay in the log) and keeps the flags it does not change. Applying the same amendment twice changes nothing. |
 | Undo | `--undo` removes the amendment and replans from today: the result is the plan a replan without it gives; an amendment it superseded is active again. |
 | Skeleton | Phases come from the goals. If a goal date edit changes the weeks already started, `plan replan` stops with `skeleton_changed`: generate a new plan instead. |
+| Strength | Same pinning, scopes, refusals and undo. A shorter session drops its accessory exercises first, then sets; other equipment chooses the exercises again; a skipped session is not made up and, like one kept under 80% of its minutes, holds its ladder rung. Fixed strength days keep key sessions off them and off the day after. |
 
 Reason codes: `amended` (the session you changed, pinned), `skipped`, `moved` (the day it left),
 `yielded_to_amendment` (same week), `rung_held` (next session of a held ladder), `rebalanced`
@@ -295,9 +361,10 @@ and the plans (`plans/`, written by the server).
 | `GET /health` | `{"status": "ok", "version": ...}`; the only route without a token |
 | `GET /profile/summary` | Resolved thresholds, zone tables, warnings, goals (read-only) |
 | `GET /plan` | Current plan: id, revision, current week, weeks summary, goals, warnings |
-| `GET /plan/weeks/{index}` | One week (1-based): load, phase, sessions with steps and absolute targets |
+| `GET /plan/weeks/{index}` | One week (1-based): load, phase, sessions with steps and absolute targets, strength sessions with their exercises |
 | `POST /plan/generate` | New plan from the profile (`expected_revision`, `dry_run`, `start`) |
 | `POST /plan/amend` | Change a session (`date`, `minutes`, `sport`, `activity`, `intent`, `skip`, `move_to`, `scope`, `reason`) |
+| `POST /plan/strength/amend` | Change a strength session (`date`, `minutes`, `skip`, `move_to`, `equipment`, `scope`, `reason`) |
 | `POST /plan/unavailable` | Unavailable or limited range (`from`, `to`, `minutes` per sport, `activity`, `scope`) |
 | `POST /plan/replan` | Rebuild from today after a profile edit |
 | `GET /plan/amendments` | The amendment log |
@@ -362,6 +429,10 @@ Sample dry run (example profile, abbreviated):
   indoor and MTB badges); previous / this / next week.
 - **Session**: steps with relative targets and absolute values (W, min/km, bpm), the
   rationale, "Change this session".
+- **Strength**: the week lists its strength sessions under the endurance ones; a strength
+  session shows its exercises (sets x reps, reps in reserve), equipment and rationale, and
+  "Change this session" offers a new duration, a move, other equipment or a skip, preview
+  first.
 - **Change this session**: new duration, sport, bike type (road, MTB, trainer), easier
   intent, move to a day of the week, skip, reason, scope (session, week, rest). The preview
   (dry run: changes with their reason, warnings, broken rules) always comes first; then
@@ -459,8 +530,8 @@ run-volume cap leaves no room for it.
 
 - Auth: API key, HTTP Basic with username `API_KEY`. The key is read from `INTERVALS_API_KEY`
   (environment or `.env`), the athlete from `INTERVALS_ATHLETE_ID` (default `0` = the key's athlete).
-- Workouts are calendar events (`category: WORKOUT`, `type` Ride / Run / MountainBikeRide)
-  whose `description` uses the intervals.icu workout text syntax. Example:
+- Workouts are calendar events (`category: WORKOUT`, `type` Ride / Run / MountainBikeRide /
+  WeightTraining) whose `description` uses the intervals.icu workout text syntax. Example:
 
       Intervals at FTP extend time at lactate threshold and raise sustainable power.
 
@@ -476,6 +547,10 @@ run-volume cap leaves no room for it.
   stay right when thresholds change in intervals.icu. Before pushing, the profile is compared
   with the intervals.icu settings and differences are printed. `--absolute-targets` pushes
   watts (`247-260w`) and paces (`4:15-4:20/km Pace`) instead.
+- **Strength sessions** are `WeightTraining` events; the workout text has no sets and reps, so
+  the exercises are plain numbered lines in the description, with the planned duration as
+  `moving_time` and the flat load estimate as `icu_training_load` (both UNVERIFIED field
+  names, see Assumptions). Their slot in the `external_id` is `strength`.
 - **Idempotent**: each event has `external_id = endurance-planner:<plan id>:<date>:<slot>` and
   is upserted (`POST /athlete/{id}/events/bulk?upsert=true`). Events of the same plan that
   are no longer in it are removed in the pushed window (`--no-prune` to keep them).
@@ -507,7 +582,11 @@ Zwift / FIT files are not generated here: intervals.icu can export them from the
 - After an amendment, later weeks are rebuilt from the real (lower) history: their caps can
   only go down, but their mix can change within them (for example shorter long runs leave
   run volume for a key session that did not fit before).
-- One session per day; no double days, no strength work, no swimming.
+- One endurance session per day (a strength session may share the day); no swimming.
+- Strength sessions are generic: no exercise choice by the athlete (other than through the
+  equipment), no loads in kg (reps in reserve instead), no plyometrics. In build weeks with
+  two key sessions and a long one, often only one strength day is valid (warning
+  `strength_dropped`).
 - One athlete, one token, no user accounts. The profile is edited on the server
   (`profile.yaml`), not in the web app. Every change from the app needs a connection; offline,
   only the weeks already opened on the device can be read.
@@ -587,6 +666,32 @@ Calendar exceptions:
 - `mode: off` may be written unquoted: PyYAML (YAML 1.1) reads it as `false`, which is read
   back as `off`.
 
+Strength sessions (F10):
+- `sessions_per_week` is a cap on the phase table; since the table never asks for more than 2,
+  3 means the same as 2 for now.
+- A "rest day" is a day without training time in the weekly pattern (or in an exception). A
+  training day without an endurance session that week may take a strength session, as long
+  as the days with endurance or strength stay within `days_per_week`; `allow_extra_days`
+  lifts both limits. An amended strength session may be on a rest day (the athlete chose it).
+- Strength minutes are not checked against the day's minutes (they are an explicit, separate
+  setting); they count in the weekly budget. The endurance volume of a week is capped at the
+  budget minus the phase's strength minutes; time kept for a session that cannot be placed
+  stays unused.
+- Hard or long = a hard intent, or the long slots (`long`, `long_2`); every race counts, and
+  an A race also blocks the 3 days before it.
+- Ladders advance once per loading week (base, build, peak, not recovery), only if every
+  strength session of that week kept its rung; recovery, taper and transition weeks repeat
+  the last rung done.
+- Exercise time estimate: 5 min warm-up, 2 min per set in base and light sessions, 3 min in
+  build and peak (rest included), 1 min per accessory set, x1.5 for single-side sets. The
+  session minutes are the estimate rounded up to 5 min (20 min at least).
+- Equipment `any of`: an exercise listing several items uses the first one available (the
+  Romanian deadlift uses the barbell when there is one, else dumbbells).
+- `STRENGTH_TSS_PER_HOUR = 35`: a moderate estimate for resistance training; it is used for
+  the CTL/ATL/TSB projection and the event load only.
+- UNVERIFIED intervals.icu fields: `moving_time` (planned duration, seconds) and
+  `icu_training_load` (planned load) on a `WeightTraining` event; no real call was made.
+
 Tooling:
 - `mypy` checks against the running interpreter (no pinned `python_version`); `ruff` targets 3.11.
 - CI (GitHub Actions) runs `pytest`, `ruff check`, `ruff format --check` and `mypy` on
@@ -634,7 +739,7 @@ Services and storage:
   `regenerated`) are folded in previews, as are the workouts of a push preview.
 - The service worker is network-first for every GET of the same origin (the app shell is
   pre-cached at install) and never touches POST requests; offline copies are marked with
-  `X-Served-From: cache`. The cache name carries a version (`v1`) to bump when the shell
+  `X-Served-From: cache`. The cache name carries a version (now `v2`) to bump when the shell
   changes.
 - Colours meet WCAG AA (4.5:1 for text, 3:1 for the focus ring) in light and dark themes;
   `tests/test_web.py` computes the ratios from the stylesheet.
@@ -658,6 +763,9 @@ Services and storage:
   are read (new fields take their defaults) and written back as version 2; newer versions are
   refused with a message asking to update the tool.
 - The JSON Schemas are committed in `schemas/` (a test keeps them in sync with the models).
+  Fields added after a schema version are left out of plan files while they hold their
+  default (`Field(exclude_if=...)`, pydantic 2.12 or later), so older files and freshly
+  generated plans without the new options are byte-identical (`tests/test_regression_v2.py`).
   The profile schema is the input form (paces as `"m:ss"`, `rest` days); the plan schema is the
   form the tool writes. Generated profiles point at the schema's URL on the `main` branch.
 - The property-style tests use a seeded `random.Random` (150 profiles) rather than Hypothesis,
@@ -715,6 +823,11 @@ Changing a plan in progress:
 - **Plan file format**: add new plan fields as optional with a default that describes older
   files, bump `PLAN_SCHEMA_VERSION` in `models/plan.py`, extend `migrate_plan_data`, add a
   stored old file under `tests/fixtures/` and regenerate `schemas/` (`plan schema -o ...`).
+- **Strength**: a new exercise is an `ExerciseSpec` in `strength.LIBRARY` (pattern, equipment
+  as any-of, `harder` for its progression chain, `high_impact` when it must be left out with
+  injury notes); its place in the list sets its priority. Ladders are in `strength.TEMPLATES`,
+  the phase table in `SESSIONS_PER_PHASE`, patterns of each session in `VARIANTS`, day rules in
+  `strength.day_problems` (checked by `validation._check_strength`).
 - **New kind of amendment**: add the field to `amend.SessionEdit` and `models.plan.Amendment`,
   apply it in `amend.amended_session`, describe it in `SessionEdit.describe`, add a CLI flag
   and cover it in `tests/test_amend.py` and in the random sequences of `tests/test_property.py`.
@@ -739,8 +852,9 @@ Changing a plan in progress:
     pytest && ruff check . && ruff format --check . && mypy
 
 Tests never touch the network. `tests/test_regression.py` compares plans with fixtures made
-before schema v2 (the example plan and a digest of each property-test plan), so a change of
-behaviour shows up as a failing test. Layout:
+before schema v2 (the example plan and a digest of each property-test plan), and
+`tests/test_regression_v2.py` compares plan files byte for byte with fixtures made before the
+strength feature, so a change of behaviour shows up as a failing test. Layout:
 
     src/endurance_planner/
       models/          profile, plan, enums, issues (pydantic)
@@ -750,6 +864,7 @@ behaviour shows up as a failing test. Layout:
       rules.py         numeric caps shared by scheduler and validator
       periodization.py templates.py specificity.py scheduler.py planner.py
       swap.py          validation.py            adapt.py (future hook)
+      strength.py      exercise library, strength ladders, placement of strength sessions
       replan.py        rebuild a running plan   amend.py        amendments (pure functions)
       export/          json_io (plan files), markdown (+ CSV), intervals_icu
       schemas.py       JSON Schemas (committed copies in schemas/)

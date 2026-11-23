@@ -25,7 +25,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from endurance_planner import __version__, services
 from endurance_planner.amend import AmendError, NoSession
 from endurance_planner.export.intervals_icu import IntervalsClient, IntervalsError
-from endurance_planner.models.enums import BikeActivity, Intent, Scope, Sport
+from endurance_planner.models.enums import BikeActivity, Equipment, Intent, Scope, Sport
 from endurance_planner.periodization import PlanningError
 from endurance_planner.replan import ReplanError
 from endurance_planner.rules import DEFAULT_SCOPE
@@ -113,6 +113,18 @@ class AmendBody(MutationBody):
     intent: Intent | None = None
     skip: bool = False
     move_to: dt.date | None = None
+    scope: Scope = DEFAULT_SCOPE
+    reason: str = ""
+
+
+class StrengthAmendBody(MutationBody):
+    date: dt.date
+    minutes: int | None = Field(None, gt=0)
+    skip: bool = False
+    move_to: dt.date | None = None
+    equipment: list[Equipment] | None = Field(
+        None, description="Equipment available for the session (bodyweight is implied)"
+    )
     scope: Scope = DEFAULT_SCOPE
     reason: str = ""
 
@@ -343,6 +355,22 @@ def create_app(
         )
         return _refused(
             service.amend(
+                today(),
+                request,
+                expected_revision=body.expected_revision,
+                dry_run=body.dry_run,
+                force=body.force,
+            )
+        )
+
+    @app.post("/plan/strength/amend", response_model=MutationResult, tags=["changes"])
+    def amend_strength(body: StrengthAmendBody, _: Auth) -> MutationResult:
+        """Change one strength session: shorter, skipped, moved or other equipment."""
+        request = services.StrengthAmendRequest.model_validate(
+            body.model_dump(exclude={"expected_revision", "dry_run", "force"})
+        )
+        return _refused(
+            service.amend_strength(
                 today(),
                 request,
                 expected_revision=body.expected_revision,

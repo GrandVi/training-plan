@@ -13,9 +13,10 @@ from endurance_planner.load import (
     week_weighted_load,
 )
 from endurance_planner.models.enums import Sport, StepKind
-from endurance_planner.models.plan import Plan, Repeat, Session, Step, Week
+from endurance_planner.models.plan import Plan, Repeat, Session, Step, StrengthSession, Week
 from endurance_planner.models.profile import CalendarException, Profile
 from endurance_planner.rules import baseline_tss
+from endurance_planner.strength import exercise_lines
 from endurance_planner.thresholds import resolve_thresholds
 from endurance_planner.units import format_clock, format_duration
 from endurance_planner.zones import ZoneSet, zone_set
@@ -102,14 +103,24 @@ def week_row(week: Week, impact: float, zones: ZoneSet) -> dict[str, str]:
     }
 
 
+# Added at the end of the weekly CSV when the plan has strength sessions.
+STRENGTH_COLUMNS = ["strength_sessions", "strength_min"]
+
+
 def weekly_csv(plan: Plan, profile: Profile) -> str:
     impact = run_impact_multiplier(profile)
     zones = zone_set(profile.thresholds.zone_models)
+    strength = any(week.strength for week in plan.weeks)
+    columns = WEEKLY_COLUMNS + (STRENGTH_COLUMNS if strength else [])
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=WEEKLY_COLUMNS, lineterminator="\n")
+    writer = csv.DictWriter(buffer, fieldnames=columns, lineterminator="\n")
     writer.writeheader()
     for week in plan.weeks:
-        writer.writerow(week_row(week, impact, zones))
+        row = week_row(week, impact, zones)
+        if strength:
+            row["strength_sessions"] = str(len(week.strength))
+            row["strength_min"] = str(week.strength_minutes)
+        writer.writerow(row)
     return buffer.getvalue()
 
 
@@ -169,6 +180,24 @@ def _session_block(session: Session) -> list[str]:
         lines.append(f"Notes: {session.notes}")
     lines.append("")
     return lines
+
+
+def _strength_block(session: StrengthSession) -> list[str]:
+    tags = [session.template_id, f"session {session.variant}"]
+    if session.pinned:
+        tags.append(f"pinned by {session.amendment_id}")
+    equipment = ", ".join(item.value for item in session.equipment_used) or "bodyweight"
+    return [
+        f"#### {session.date:%a %d %b} - WeightTraining: {session.name}",
+        "",
+        f"{session.minutes} min, about {strength_tss(session.minutes):.0f} TSS "
+        f"({', '.join(tags)}); equipment: {equipment}",
+        "",
+        *[f"- {line.split('. ', 1)[1]}" for line in exercise_lines(session)],
+        "",
+        f"Why: {session.rationale}",
+        "",
+    ]
 
 
 def _threshold_lines(profile: Profile, today: dt.date) -> list[str]:
@@ -234,14 +263,27 @@ def render_markdown(
         out += ["## Amendments", "", *[f"- {line}" for line in amendment_lines(plan)], ""]
 
     ratio = profile.preferences.intensity_ratio
+    strength = any(week.strength for week in plan.weeks)
+    header = "| Wk | Start | Phase | Hours | Bike | Run | TSS | Load | Low/High | Key sessions |"
+    rule = "|---:|---|---|---:|---:|---:|---:|---:|---:|---|"
+    if strength:
+        header, rule = header + " Strength |", rule + "---:|"
     out += [
         "## Weekly overview",
         "",
         f"Load = TSS with run TSS x {impact:g} (used for ramp limits). Low/high = share of time "
         f"below/above LT1, both sports combined (target {ratio.low:.0%}/{ratio.high:.0%}).",
+        *(
+            [
+                "Strength = strength sessions (total minutes); their time counts in the weekly "
+                "budget, not in the hours, TSS or load columns."
+            ]
+            if strength
+            else []
+        ),
         "",
-        "| Wk | Start | Phase | Hours | Bike | Run | TSS | Load | Low/High | Key sessions |",
-        "|---:|---|---|---:|---:|---:|---:|---:|---:|---|",
+        header,
+        rule,
     ]
     for week in plan.weeks:
         row = week_row(week, impact, zones)
@@ -250,11 +292,15 @@ def render_markdown(
         keys = row["key_sessions"] or "-"
         if week.races:
             keys += f" / RACE: {row['races']}"
-        out.append(
+        line = (
             f"| {row['week']} | {row['start']} | {phase} | {row['hours']} | {row['bike_hours']} "
             f"| {row['run_hours']} | {row['tss']} | {row['weighted_load']} "
             f"| {row['low_pct']}/{row['high_pct']} | {keys} |"
         )
+        if strength:
+            count = len(week.strength)
+            line += f" {f'{count} ({week.strength_minutes} min)' if count else '-'} |"
+        out.append(line)
     out.append("")
     if any(week_exceptions(week, profile) for week in plan.weeks):
         out += ["\\* calendar exception this week (see the week details)", ""]
@@ -268,6 +314,10 @@ def render_markdown(
                 out += [f"Race this week: {', '.join(week.races)}", ""]
             for exception in week_exceptions(week, profile):
                 out += [f"Calendar exception: {exception.label()}", ""]
-            for session in week.sessions:
-                out += _session_block(session)
+            items: list[Session | StrengthSession] = [*week.sessions, *week.strength]
+            for item in sorted(items, key=lambda x: (x.date, isinstance(x, StrengthSession))):
+                if isinstance(item, StrengthSession):
+                    out += _strength_block(item)
+                else:
+                    out += _session_block(item)
     return "\n".join(out).rstrip() + "\n"

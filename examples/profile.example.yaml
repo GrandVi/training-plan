@@ -74,6 +74,13 @@ availability:                   # habits and constraints (hard limits)
   #   - {from: 2027-03-13, mode: limited, minutes: {bike: 300}, note: "free Saturday"}
   # limited: minutes replace the usual ones for the sports listed (0 = not that sport);
   # bike_activity: road | mtb | trainer forces the kind of every bike session in the range.
+  #   - {from: 2027-02-16, to: 2027-02-19, mode: limited, minutes: {run: 45}, equipment: [bodyweight]}
+  # equipment: strength equipment available in the range (default: strength.equipment).
+  strength:                     # strength sessions (default: off)
+    sessions_per_week: 0        # 0 = off; 1 to 3 = most sessions a week (base and build plan 2)
+    minutes: 40                 # 20 to 60 per session; counts in weekly_hours_budget
+    allow_extra_days: false     # true: may use a rest day or go over days_per_week
+    equipment: [bodyweight, dumbbells, barbell]   # also: kettlebell, bands, pullup_bar, machines
 
 goals:                          # [required] at least one
   - name: "10k local race"

@@ -4,7 +4,8 @@ Pure: no file, network, environment or clock access. Every function takes the ob
 works on (profile, plan, `today`, an intervals.icu client) and returns pydantic models or
 JSON-compatible data. They call the planning library; they do not re-implement it.
 
-Mutations (generate, amend, declare_unavailable, replan, undo_amendment, swap, retarget)
+Mutations (generate, amend, amend_strength, declare_unavailable, replan, undo_amendment, swap,
+retarget)
 return an `Outcome`: the plan to store (None for a dry run or a refused change) and a
 `MutationResult` (changes with reason codes, issues, new revision). They take
 `expected_revision` and raise RevisionConflict when the plan has another revision.
@@ -37,6 +38,7 @@ from endurance_planner.models.enums import (
     ActivityType,
     AmendmentKind,
     BikeActivity,
+    Equipment,
     Intent,
     Phase,
     Priority,
@@ -59,6 +61,7 @@ from endurance_planner.models.plan import (
 from endurance_planner.models.profile import Profile
 from endurance_planner.profile_tools import zone_report
 from endurance_planner.rules import DEFAULT_SCOPE
+from endurance_planner.strength import exercise_lines
 from endurance_planner.thresholds import resolve_thresholds
 from endurance_planner.units import format_clock
 from endurance_planner.zones import zone_set, zone_tables
@@ -210,6 +213,8 @@ class WeekView(BaseModel):
     high_pct: int
     exceptions: list[str]  # calendar exceptions touching the week
     sessions: list[SessionDetail]
+    strength: list[StrengthDetail] = Field(default_factory=list)
+    strength_minutes: int = 0  # counts in the weekly budget, not in duration_s or tss
 
 
 class WeekSummary(BaseModel):
@@ -223,6 +228,8 @@ class WeekSummary(BaseModel):
     key_sessions: list[str]
     races: list[str]
     exception: bool
+    strength_sessions: int = 0
+    strength_minutes: int = 0
 
 
 class GoalView(BaseModel):
@@ -387,6 +394,27 @@ class AmendRequest(BaseModel):
         )
 
 
+class StrengthAmendRequest(BaseModel):
+    """Change one strength session (see amend.amend_strength). Flags combine, except `skip`.
+    `equipment` replaces the equipment available that day (bodyweight is always there)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    date: dt.date
+    minutes: int | None = Field(None, gt=0)
+    skip: bool = False
+    move_to: dt.date | None = None
+    equipment: list[Equipment] | None = None
+    scope: Scope = DEFAULT_SCOPE
+    reason: str = ""
+
+    def edit(self) -> amend_lib.StrengthEdit:
+        equipment = tuple(self.equipment) if self.equipment is not None else None
+        return amend_lib.StrengthEdit(
+            minutes=self.minutes, skip=self.skip, move_to=self.move_to, equipment=equipment
+        )
+
+
 class UnavailableRequest(BaseModel):
     """A date range with no training (no `minutes`) or limited minutes per sport."""
 
@@ -546,6 +574,8 @@ def plan_overview(plan: Plan, profile: Profile, today: dt.date) -> PlanOverview:
                 key_sessions=[s.name for s in week.sessions if s.intent.hard],
                 races=week.races,
                 exception=bool(week_exceptions(week, effective)),
+                strength_sessions=len(week.strength),
+                strength_minutes=week.strength_minutes,
             )
         )
     return PlanOverview(
@@ -587,6 +617,17 @@ def show_week(plan: Plan, profile: Profile, index: int) -> WeekView:
         high_pct=int(row["high_pct"]),
         exceptions=[e.label() for e in week_exceptions(week, effective)],
         sessions=[_detail(session) for session in week.sessions],
+        strength=[strength_detail(session) for session in week.strength],
+        strength_minutes=week.strength_minutes,
+    )
+
+
+def strength_detail(session: StrengthSession) -> StrengthDetail:
+    return StrengthDetail(
+        **StrengthView.of(session).model_dump(),
+        rationale=session.rationale,
+        exercises=session.exercises,
+        lines=exercise_lines(session),
     )
 
 
@@ -708,6 +749,44 @@ def amend(
     check_revision(plan, expected_revision)
     edit = request.edit()
     result = amend_lib.amend_session(
+        plan,
+        profile,
+        today,
+        request.date,
+        edit,
+        scope=request.scope,
+        reason=request.reason,
+        force=force,
+    )
+    message = ""
+    if result.amendment is not None:
+        message = f"amendment {result.amendment.id}: {edit.describe()} (scope {request.scope})"
+    return _finish(
+        plan,
+        result.plan,
+        changes=result.changes,
+        issues=result.issues,
+        dry_run=dry_run,
+        force=force,
+        message=message,
+        amendment=result.amendment,
+    )
+
+
+def amend_strength(
+    plan: Plan,
+    profile: Profile,
+    today: dt.date,
+    request: StrengthAmendRequest,
+    *,
+    expected_revision: int | None,
+    dry_run: bool = False,
+    force: bool = False,
+) -> Outcome:
+    """Shorten, skip, move or re-equip one strength session (amend.amend_strength)."""
+    check_revision(plan, expected_revision)
+    edit = request.edit()
+    result = amend_lib.amend_strength(
         plan,
         profile,
         today,
@@ -988,6 +1067,27 @@ class PlannerService:
     ) -> MutationResult:
         return self._mutate(
             lambda plan, profile: amend(
+                plan,
+                profile,
+                today,
+                request,
+                expected_revision=expected_revision,
+                dry_run=dry_run,
+                force=force,
+            )
+        )
+
+    def amend_strength(
+        self,
+        today: dt.date,
+        request: StrengthAmendRequest,
+        *,
+        expected_revision: int | None,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> MutationResult:
+        return self._mutate(
+            lambda plan, profile: amend_strength(
                 plan,
                 profile,
                 today,

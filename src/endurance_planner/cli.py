@@ -20,7 +20,15 @@ from endurance_planner.export.intervals_icu import (
 )
 from endurance_planner.export.json_io import load_plan, save_plan
 from endurance_planner.export.markdown import render_markdown
-from endurance_planner.models.enums import BikeActivity, GoalType, Intent, Scope, Severity, Sport
+from endurance_planner.models.enums import (
+    BikeActivity,
+    Equipment,
+    GoalType,
+    Intent,
+    Scope,
+    Severity,
+    Sport,
+)
 from endurance_planner.models.issues import Issue
 from endurance_planner.models.plan import Plan
 from endurance_planner.models.profile import Profile
@@ -350,6 +358,16 @@ def plan_amend(
     move_to: Annotated[
         str | None, typer.Option(help="Move it to this day of the same week.")
     ] = None,
+    strength: Annotated[
+        bool, typer.Option("--strength", help="Change the strength session of that day.")
+    ] = False,
+    equipment: Annotated[
+        str | None,
+        typer.Option(
+            help="With --strength: equipment available, comma-separated (e.g. dumbbells,bands; "
+            "'bodyweight' for none)."
+        ),
+    ] = None,
     scope: ScopeOption = DEFAULT_SCOPE,
     dry_run: DryRunOption = False,
     reason: ReasonOption = "",
@@ -359,8 +377,38 @@ def plan_amend(
     today: TodayOption = None,
 ) -> None:
     """Change one session (shorter, other sport or bike, easier, skipped, moved); the rest
-    of the plan adapts according to --scope. The session is pinned and the change logged."""
+    of the plan adapts according to --scope. The session is pinned and the change logged.
+    With --strength: the strength session of that day (shorter, skipped, moved, other
+    equipment)."""
     loaded, athlete = _plan(plan), _profile(profile)
+    if strength or equipment is not None:
+        if sport or activity or intent:
+            raise _fail("--sport, --activity and --intent do not apply to strength sessions")
+        strength_request = services.StrengthAmendRequest(
+            date=_date(date),
+            minutes=minutes,
+            skip=skip,
+            move_to=_date(move_to) if move_to else None,
+            equipment=_equipment(equipment),
+            scope=scope,
+            reason=reason,
+        )
+        try:
+            outcome = services.amend_strength(
+                loaded,
+                athlete,
+                _date(today),
+                strength_request,
+                expected_revision=loaded.revision,
+                dry_run=dry_run,
+                force=force,
+            )
+        except (AmendError, PlanningError) as exc:
+            raise _fail(str(exc)) from exc
+        if outcome.result.message:
+            typer.echo(outcome.result.message, err=True)
+        _changes(outcome, plan, out)
+        return
     request = services.AmendRequest(
         date=_date(date),
         minutes=minutes,
@@ -387,6 +435,17 @@ def plan_amend(
     if outcome.result.message:
         typer.echo(outcome.result.message, err=True)
     _changes(outcome, plan, out)
+
+
+def _equipment(value: str | None) -> list[Equipment] | None:
+    """'dumbbells,bands' -> [dumbbells, bands]; None: the profile's equipment."""
+    if value is None:
+        return None
+    try:
+        return [Equipment(name.strip()) for name in value.split(",") if name.strip()]
+    except ValueError as exc:
+        names = ", ".join(item.value for item in Equipment)
+        raise _fail(f"--equipment: expected names among {names}, got {value!r}") from exc
 
 
 def _day_minutes(value: str | None) -> dict[Sport, int] | None:
