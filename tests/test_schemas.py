@@ -103,3 +103,13 @@ def test_schema_commands(command: str, tmp_path: Path) -> None:
     written = runner.invoke(app, [command, "schema", "-o", str(out)])
     assert written.exit_code == 0
     assert out.read_text(encoding="utf-8") == printed.output
+
+
+def test_plan_schema_describes_the_plan() -> None:
+    """The plan schema keeps its structure (an empty schema would accept anything)."""
+    schema = plan_json_schema()
+    assert {"id", "weeks", "goals", "amendments", "revision"} <= set(schema["properties"])
+    assert "strength" in schema["$defs"]["Week"]["properties"]
+    bad = generate_plan(run_10k_profile(), TODAY).model_dump(mode="json")
+    bad["weeks"][0]["sessions"][0]["sport"] = "swim"
+    assert _errors(schema, bad) != []

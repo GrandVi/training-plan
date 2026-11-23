@@ -13,9 +13,7 @@ from typing import Any, Literal, Self
 from pydantic import (
     BaseModel,
     Field,
-    SerializerFunctionWrapHandler,
     computed_field,
-    model_serializer,
     model_validator,
 )
 
@@ -37,6 +35,21 @@ from endurance_planner.models.enums import (
 from endurance_planner.models.issues import Issue
 from endurance_planner.models.profile import CalendarException, Goal, Profile
 from endurance_planner.units import format_clock
+
+
+# Fields added after a schema version are not written while they hold their default, so
+# files written without them stay byte-identical (Field exclude_if, which also keeps the
+# serialization JSON Schema complete).
+def _empty(value: list[Any]) -> bool:
+    return not value
+
+
+def _unset(value: object) -> bool:
+    return value is None
+
+
+def _zero(value: int) -> bool:
+    return value == 0
 
 
 def _span(low: str, high: str) -> str:
@@ -197,14 +210,7 @@ class Week(BaseModel):
     races: list[str] = Field(default_factory=list)  # goals raced this week
     sessions: list[Session] = Field(default_factory=list)
     # Strength sessions (F10). Not written while empty: plans without strength are unchanged.
-    strength: list[StrengthSession] = Field(default_factory=list)
-
-    @model_serializer(mode="wrap")
-    def _omit_empty_strength(self, handler: SerializerFunctionWrapHandler) -> Any:
-        data = handler(self)
-        if not self.strength and isinstance(data, dict):
-            data.pop("strength", None)
-        return data
+    strength: list[StrengthSession] = Field(default_factory=list, exclude_if=_empty)
 
     @property
     def strength_minutes(self) -> int:
@@ -225,9 +231,10 @@ class Amendment(BaseModel):
     """A change requested on a running plan, kept in Plan.amendments (see amend.py).
 
     Session amendments edit, skip or move the session planned on `date`; their result
-    is pinned in the plan. Unavailable amendments add a calendar exception from `date`
-    to `to` (inclusive). A later amendment of the same session supersedes the earlier one;
-    both stay in the log.
+    is pinned in the plan. Strength amendments do the same for the strength session of
+    `date` (minutes, skip, move, equipment). Unavailable amendments add a calendar exception
+    from `date` to `to` (inclusive). A later amendment of the same session supersedes the
+    earlier one; both stay in the log.
     """
 
     id: str
@@ -248,6 +255,9 @@ class Amendment(BaseModel):
     original: Session | None = None  # session as planned before any amendment
     replaces: str | None = None  # amendment of the same session it superseded
     superseded_by: str | None = None
+    # Strength amendments (F10); not written while unset, so older logs are unchanged.
+    equipment: list[Equipment] | None = Field(None, exclude_if=_unset)  # available for it
+    original_strength: StrengthSession | None = Field(None, exclude_if=_unset)  # as planned
 
     @property
     def active(self) -> bool:
@@ -305,19 +315,12 @@ class Plan(BaseModel):
     # Version of the stored plan: every saved change made through the services adds 1, and a
     # change based on an older revision is refused (services.RevisionConflict). Files without
     # it read as 0, and 0 is not written, so a freshly generated plan file is unchanged.
-    revision: int = Field(0, ge=0)
+    revision: int = Field(0, ge=0, exclude_if=_zero)
 
     @model_validator(mode="before")
     @classmethod
     def _migrate(cls, data: Any) -> Any:
         return migrate_plan_data(data)
-
-    @model_serializer(mode="wrap")
-    def _omit_initial_revision(self, handler: SerializerFunctionWrapHandler) -> Any:
-        data = handler(self)
-        if self.revision == 0 and isinstance(data, dict):
-            data.pop("revision", None)
-        return data
 
     def active_amendments(self, kind: AmendmentKind | None = None) -> list[Amendment]:
         return [a for a in self.amendments if a.active and (kind is None or a.kind is kind)]

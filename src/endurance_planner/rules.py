@@ -53,6 +53,8 @@ DEFAULT_SCOPE = Scope.REST
 # A key session done at this share of its planned length (or more) completes its rung;
 # skipped or shorter, its ladder does not advance and the next one repeats the rung.
 KEY_COMPLETED_SHARE = 0.80
+# Same for a strength session, on its planned minutes (F10).
+STRENGTH_COMPLETED_SHARE = 0.80
 # Below the first rung of its ladder, a key session's main set may be scaled down to this
 # share of its length at most; shorter than that, it becomes plain endurance (with a warning).
 KEY_MIN_SCALE = 0.75

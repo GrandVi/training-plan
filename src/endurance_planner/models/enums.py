@@ -148,6 +148,7 @@ class Scope(StrEnum):
 class AmendmentKind(StrEnum):
     SESSION = "session"  # one session edited, skipped or moved
     UNAVAILABLE = "unavailable"  # a date range with less (or no) time
+    STRENGTH = "strength"  # one strength session shortened, skipped, moved or re-equipped
 
 
 class Severity(StrEnum):

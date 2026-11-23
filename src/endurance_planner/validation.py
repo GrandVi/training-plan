@@ -464,6 +464,38 @@ def _check_amendments(plan: Plan) -> Iterator[Issue]:
                 "active amendment of this plan, or the session is not pinned",
                 week_of[session.date],
             )
+    yield from _check_strength_amendments(plan)
+
+
+def _check_strength_amendments(plan: Plan) -> Iterator[Issue]:
+    """The same for strength sessions and their amendments."""
+    strength = [(item, week) for week in plan.weeks for item in week.strength]
+    active = {a.id: a for a in plan.active_amendments(AmendmentKind.STRENGTH)}
+    for amendment in active.values():
+        results = [item for item, _ in strength if item.amendment_id == amendment.id]
+        if amendment.skip:
+            for item, week in strength:
+                if item.date == amendment.date and item.amendment_id is None:
+                    yield _error(
+                        "amendment_mismatch",
+                        f"{item.date} {item.name}: planned on a day whose strength session "
+                        f"was skipped by amendment {amendment.id}",
+                        week,
+                    )
+        elif len(results) != 1:
+            yield _error(
+                "amendment_mismatch",
+                f"amendment {amendment.id} ({amendment.date}) has {len(results)} strength "
+                "session(s) in the plan, expected 1",
+            )
+    for item, week in strength:
+        if item.amendment_id is not None and (item.amendment_id not in active or not item.pinned):
+            yield _error(
+                "amendment_mismatch",
+                f"{item.date} {item.name}: amendment {item.amendment_id} is not an active "
+                "strength amendment of this plan, or the session is not pinned",
+                week,
+            )
 
 
 def _check_strength(plan: Plan, profile: Profile) -> Iterator[Issue]:
@@ -509,7 +541,8 @@ def _check_strength(plan: Plan, profile: Profile) -> Iterator[Issue]:
             previous = session
             yield from _check_strength_phase(session, week)
             available = profile.availability.equipment(session.date)
-            available |= set(_amended_equipment(plan, session))
+            if _amended_equipment(plan, session):
+                available = {Equipment.BODYWEIGHT, *_amended_equipment(plan, session)}
             for exercise in session.exercises:
                 spec = EXERCISES.get(exercise.id)
                 if spec is None:
@@ -535,7 +568,10 @@ def _check_strength(plan: Plan, profile: Profile) -> Iterator[Issue]:
 
 def _amended_equipment(plan: Plan, session: StrengthSession) -> list[Equipment]:
     """Equipment stated by the amendment that produced the session (none: the profile's)."""
-    return []
+    amendment = next((a for a in plan.amendments if a.id == session.amendment_id), None)
+    if amendment is None or amendment.equipment is None:
+        return []
+    return amendment.equipment
 
 
 def _check_strength_phase(session: StrengthSession, week: Week) -> Iterator[Issue]:

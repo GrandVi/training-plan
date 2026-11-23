@@ -21,6 +21,10 @@ How the plan follows (numbers and reason codes in rules.py):
 - explicit means allowed: an amended session may exceed the day's usual minutes, never a
   safety cap; the errors it causes are returned and the caller decides (--force).
 - amendments of past days are refused.
+
+Strength sessions (amend_strength) can be shortened (accessory exercises go first), skipped,
+moved within their week or given other equipment (the exercises are chosen again); a skipped
+session, or one kept under 80% of its minutes, holds its ladder rung.
 """
 
 import datetime as dt
@@ -32,6 +36,7 @@ from endurance_planner.models.enums import (
     ActivityType,
     AmendmentKind,
     BikeActivity,
+    Equipment,
     Intent,
     Phase,
     Priority,
@@ -42,7 +47,16 @@ from endurance_planner.models.enums import (
     StepKind,
 )
 from endurance_planner.models.issues import Issue
-from endurance_planner.models.plan import Amendment, Plan, Repeat, Session, Step, Target, Week
+from endurance_planner.models.plan import (
+    Amendment,
+    Plan,
+    Repeat,
+    Session,
+    Step,
+    StrengthSession,
+    Target,
+    Week,
+)
 from endurance_planner.models.profile import Goal, Profile
 from endurance_planner.replan import (
     Change,
@@ -57,8 +71,10 @@ from endurance_planner.rules import (
     EASIER_INTENTS,
     KEY_COMPLETED_SHARE,
     KEY_MIN_SCALE,
+    STRENGTH_COMPLETED_SHARE,
 )
 from endurance_planner.scheduler import LONG_SLOTS, Scheduler, race_pace
+from endurance_planner.strength import MIN_SESSION_MINUTES, SessionRequest, build_session
 from endurance_planner.swap import SwapError, _scale_blocks, convert_for_day, convert_session
 from endurance_planner.targets import NATIVE_KIND, express_blocks, resolve_session
 from endurance_planner.templates import (
@@ -644,6 +660,208 @@ def add_unavailable(
     return AmendResult(new_plan, amendment, changes, issues)
 
 
+# ---------------------------------------------------------------------- strength sessions
+@dataclass(frozen=True)
+class StrengthEdit:
+    """What to change in one strength session. Flags combine, except `skip`."""
+
+    minutes: int | None = None
+    skip: bool = False
+    move_to: dt.date | None = None
+    equipment: tuple[Equipment, ...] | None = None
+
+    def describe(self) -> str:
+        if self.skip:
+            return "strength skipped"
+        parts = []
+        if self.equipment is not None:
+            parts.append("with " + ", ".join(item.value for item in self.equipment))
+        if self.minutes is not None:
+            parts.append(f"{self.minutes} min")
+        if self.move_to is not None:
+            parts.append(f"moved to {self.move_to}")
+        return "strength " + ", ".join(parts)
+
+
+def strength_edit_of(amendment: Amendment) -> StrengthEdit:
+    equipment = tuple(amendment.equipment) if amendment.equipment is not None else None
+    return StrengthEdit(
+        minutes=amendment.minutes,
+        skip=amendment.skip,
+        move_to=amendment.move_to,
+        equipment=equipment,
+    )
+
+
+def _merge_strength(base: Amendment | None, edit: StrengthEdit) -> StrengthEdit:
+    if edit.skip or base is None or base.skip:
+        return edit
+    before = strength_edit_of(base)
+    return StrengthEdit(
+        minutes=edit.minutes or before.minutes,
+        move_to=edit.move_to or before.move_to,
+        equipment=edit.equipment if edit.equipment is not None else before.equipment,
+    )
+
+
+def _check_strength_edit(edit: StrengthEdit) -> None:
+    others = [f.name for f in fields(edit) if f.name != "skip" and getattr(edit, f.name)]
+    if edit.skip and others:
+        raise AmendError(f"--skip cannot be combined with other changes ({', '.join(others)})")
+    if not edit.skip and not others and edit.equipment is None:
+        raise AmendError("nothing to change: give --minutes, --move-to, --equipment or --skip")
+    if edit.minutes is not None and edit.minutes < MIN_SESSION_MINUTES:
+        raise AmendError(f"a strength session takes at least {MIN_SESSION_MINUTES} min")
+
+
+def amended_strength(
+    original: StrengthSession,
+    edit: StrengthEdit,
+    profile: Profile,
+    recovery: bool,
+    amendment_id: str,
+    today: dt.date,
+) -> StrengthSession | None:
+    """The strength session with the edit applied, pinned (None when skipped). It is built
+    again at its rung for the new date, equipment and minutes, so shortening drops the
+    accessory exercises first. `profile` should include the plan's unavailable ranges."""
+    if edit.skip:
+        return None
+    date = edit.move_to or original.date
+    equipment = (
+        {Equipment.BODYWEIGHT, *edit.equipment}
+        if edit.equipment is not None
+        else profile.availability.equipment(date)
+    )
+    minutes = edit.minutes or original.minutes
+    session = build_session(
+        SessionRequest(
+            date=date,
+            phase=original.phase,
+            template_id=original.template_id,
+            level=original.rung or 0,
+            variant=original.variant,
+            recovery=recovery,
+            equipment=frozenset(equipment),
+            injury=bool(profile.athlete.injury_notes.strip()),
+            minutes=minutes,
+        )
+    )
+    if session is None:
+        raise AmendError(f"{original.date} {original.name}: does not fit in {minutes} min")
+    completed = session.minutes >= STRENGTH_COMPLETED_SHARE * original.minutes
+    note = f"Amended on {today}: {edit.describe()}."
+    return session.model_copy(
+        update={
+            "rung": original.rung if completed else None,
+            "pinned": True,
+            "amendment_id": amendment_id,
+            "rationale": f"{session.rationale} {note}",
+        }
+    )
+
+
+def _with_strength(
+    plan: Plan, drop: Sequence[StrengthSession], add: Sequence[StrengthSession]
+) -> list[Week]:
+    ids = {id(session) for session in drop}
+    weeks = []
+    for week in plan.weeks:
+        end = week.start + dt.timedelta(days=6)
+        sessions = [s for s in week.strength if id(s) not in ids]
+        sessions += [s for s in add if week.start <= s.date <= end]
+        weeks.append(week.model_copy(update={"strength": sorted(sessions, key=lambda s: s.date)}))
+    return weeks
+
+
+def amend_strength(
+    plan: Plan,
+    profile: Profile,
+    today: dt.date,
+    date: dt.date,
+    edit: StrengthEdit,
+    *,
+    scope: Scope = DEFAULT_SCOPE,
+    reason: str = "",
+    force: bool = False,
+) -> AmendResult:
+    """Shorten, skip, move or re-equip the strength session on `date` and adapt the plan
+    (same scopes, pinning, superseding and refusal rules as amend_session)."""
+    _check_strength_edit(edit)
+    sessions = [s for week in plan.weeks for s in week.strength]
+    current = next((s for s in sessions if s.date == date), None)
+    active = {a.id: a for a in plan.active_amendments(AmendmentKind.STRENGTH)}
+    base: Amendment | None = None
+    if current is not None and current.amendment_id is not None:
+        base = active.get(current.amendment_id)
+        if base is None:
+            raise AmendError(f"{date}: amendment {current.amendment_id} is not in the plan's log")
+    elif current is None:
+        base = next((a for a in active.values() if a.skip and a.date == date), None)
+        if base is None:
+            raise NoSession(f"no strength session on {date}")
+    if date < today:
+        raise AmendError(f"{date} is before today ({today}): past days cannot be amended")
+    original = base.original_strength if base is not None else current
+    assert original is not None
+    merged = _merge_strength(base, edit)
+    if base is not None and strength_edit_of(base) == merged:
+        message = f"{date}: amendment {base.id} already does this; nothing changed"
+        return AmendResult(plan, None, [], [_issue("already_applied", message, None)])
+    index = week_index(plan, original.date)
+    if merged.move_to is not None:
+        if merged.move_to < today:
+            raise AmendError(f"--move-to {merged.move_to} is before today ({today})")
+        if week_index(plan, merged.move_to) != index:
+            raise AmendError(f"--move-to {merged.move_to} is not in the week of {original.date}")
+        if any(s.date == merged.move_to and s.pinned and s is not current for s in sessions):
+            raise AmendError(f"{merged.move_to} already has an amended strength session")
+
+    effective = plan.effective_profile(profile)
+    amendment_id = _next_id(plan)
+    recovery = plan.weeks[index].recovery
+    result = amended_strength(original, merged, effective, recovery, amendment_id, today)
+    amendment = Amendment(
+        id=amendment_id,
+        kind=AmendmentKind.STRENGTH,
+        created=today,
+        date=original.date,
+        skip=merged.skip,
+        move_to=merged.move_to,
+        minutes=merged.minutes,
+        equipment=list(merged.equipment) if merged.equipment is not None else None,
+        scope=scope,
+        reason=reason,
+        force=force,
+        original_strength=original.model_copy(update={"pinned": False, "amendment_id": None}),
+        replaces=base.id if base is not None else None,
+    )
+    log = [
+        a.model_copy(update={"superseded_by": amendment_id}) if base and a.id == base.id else a
+        for a in plan.amendments
+    ]
+    drop = [s for s in sessions if s.date == original.date and s.amendment_id is None]
+    drop += [s for s in sessions if base is not None and s.amendment_id == base.id]
+    staged_weeks = _with_strength(plan, drop, [result] if result is not None else [])
+    staged = plan.model_copy(update={"weeks": staged_weeks, "amendments": [*log, amendment]})
+    week = plan.weeks[index]
+    week_end = week.start + dt.timedelta(days=6)
+
+    def reason_of(day: dt.date) -> str | None:
+        if result is not None and day == result.date:
+            return "amended"
+        if day == original.date:
+            return "skipped" if result is None else "moved"
+        if week.start <= day <= week_end:
+            return "yielded_to_amendment"
+        return None
+
+    new_plan, changes, issues = _apply(
+        plan, staged, profile, today, scope, (index, index), reason_of, []
+    )
+    return AmendResult(new_plan, amendment, changes, issues)
+
+
 def undo_amendment(plan: Plan, profile: Profile, today: dt.date, amendment_id: str) -> AmendResult:
     """Remove an amendment and replan from today: the result is the plan a replan without
     that amendment gives. An amendment it had superseded becomes active again."""
@@ -651,19 +869,32 @@ def undo_amendment(plan: Plan, profile: Profile, today: dt.date, amendment_id: s
     if target is None:
         known = ", ".join(a.id for a in plan.amendments) or "none"
         raise AmendError(f"no amendment {amendment_id} in this plan (amendments: {known})")
-    if target.kind is AmendmentKind.SESSION and target.date < today:
+    if target.kind is not AmendmentKind.UNAVAILABLE and target.date < today:
         raise AmendError(f"amendment {amendment_id} concerns {target.date}, a past day")
     effective = plan.effective_profile(profile)
     thresholds, _ = resolve_thresholds(effective, today)
     log: list[Amendment] = []
     restored: list[Session] = []
+    restored_strength: list[StrengthSession] = []
     for amendment in plan.amendments:
         if amendment.id == amendment_id:
             continue
         update: dict[str, object] = {}
         if amendment.replaces == amendment_id:
             update["replaces"] = target.replaces
-        if amendment.id == target.replaces and target.active:
+        if amendment.id == target.replaces and target.active and amendment.original_strength:
+            update["superseded_by"] = None
+            recovery = plan.weeks[week_index(plan, amendment.date)].recovery
+            again_strength = amended_strength(
+                amendment.original_strength,
+                strength_edit_of(amendment),
+                effective,
+                recovery,
+                amendment.id,
+                amendment.created,
+            )
+            restored_strength += [again_strength] if again_strength is not None else []
+        elif amendment.id == target.replaces and target.active:
             update["superseded_by"] = None
             assert amendment.original is not None
             again, _ = amended_session(
@@ -678,10 +909,15 @@ def undo_amendment(plan: Plan, profile: Profile, today: dt.date, amendment_id: s
             restored += [again] if again is not None else []
         log.append(amendment.model_copy(update=update) if update else amendment)
     drop = [s for week in plan.weeks for s in week.sessions if s.amendment_id == amendment_id]
-    staged = plan.model_copy(
-        update={"weeks": _with_sessions(plan, drop, restored), "amendments": log}
-    )
+    weeks = _with_sessions(plan, drop, restored)
+    drop_strength = [
+        s for week in plan.weeks for s in week.strength if s.amendment_id == amendment_id
+    ]
+    strength_plan = plan.model_copy(update={"weeks": weeks})
+    weeks = _with_strength(strength_plan, drop_strength, restored_strength)
+    staged = plan.model_copy(update={"weeks": weeks, "amendments": log})
     dates = {target.date, target.move_to} | {s.date for s in drop + restored}
+    dates |= {s.date for s in drop_strength + restored_strength}
     if target.kind is AmendmentKind.UNAVAILABLE:
         days = (target.last - target.date).days + 1
         dates |= {target.date + dt.timedelta(days=offset) for offset in range(days)}
@@ -717,6 +953,10 @@ def describe_amendment(amendment: Amendment) -> str:
     if amendment.kind is AmendmentKind.UNAVAILABLE:
         exception = amendment.as_exception()
         what = f"unavailable {exception.label()}"
+    elif amendment.kind is AmendmentKind.STRENGTH:
+        strength = amendment.original_strength
+        name = f" {strength.name}" if strength is not None else ""
+        what = f"{amendment.date}{name}: {strength_edit_of(amendment).describe()}"
     else:
         original = amendment.original
         name = f" {original.name}" if original is not None else ""

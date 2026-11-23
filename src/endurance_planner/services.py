@@ -32,7 +32,7 @@ from endurance_planner.export.markdown import (
     week_row,
     weekly_csv,
 )
-from endurance_planner.load import run_impact_multiplier
+from endurance_planner.load import run_impact_multiplier, strength_tss
 from endurance_planner.models.enums import (
     ActivityType,
     AmendmentKind,
@@ -47,7 +47,15 @@ from endurance_planner.models.enums import (
     StepKind,
 )
 from endurance_planner.models.issues import Issue
-from endurance_planner.models.plan import Amendment, Plan, Repeat, Session, Step
+from endurance_planner.models.plan import (
+    Amendment,
+    Exercise,
+    Plan,
+    Repeat,
+    Session,
+    Step,
+    StrengthSession,
+)
 from endurance_planner.models.profile import Profile
 from endurance_planner.profile_tools import zone_report
 from endurance_planner.rules import DEFAULT_SCOPE
@@ -125,6 +133,44 @@ class SessionView(BaseModel):
             pinned=session.pinned,
             amendment_id=session.amendment_id,
         )
+
+
+class StrengthView(BaseModel):
+    """A strength session as listed in a week or a diff."""
+
+    date: dt.date
+    weekday: str
+    name: str
+    minutes: int
+    tss: float  # flat estimate (load.STRENGTH_TSS_PER_HOUR)
+    phase: Phase
+    template_id: str
+    variant: str
+    equipment: list[str]
+    pinned: bool
+    amendment_id: str | None
+
+    @classmethod
+    def of(cls, session: StrengthSession) -> "StrengthView":
+        return cls(
+            date=session.date,
+            weekday=f"{session.date:%a}",
+            name=session.name,
+            minutes=session.minutes,
+            tss=strength_tss(session.minutes),
+            phase=session.phase,
+            template_id=session.template_id,
+            variant=session.variant,
+            equipment=[item.value for item in session.equipment_used],
+            pinned=session.pinned,
+            amendment_id=session.amendment_id,
+        )
+
+
+class StrengthDetail(StrengthView):
+    rationale: str
+    exercises: list[Exercise]
+    lines: list[str]  # one per exercise, as in the description pushed to intervals.icu
 
 
 class StepLine(BaseModel):
@@ -228,17 +274,29 @@ class ProfileSummary(BaseModel):
 class ChangeView(BaseModel):
     date: dt.date
     code: str  # key of rules.CHANGE_REASONS
-    before: SessionView | None
-    after: SessionView | None
+    kind: Literal["session", "strength"] = "session"
+    before: SessionView | None = None
+    after: SessionView | None = None
+    strength_before: StrengthView | None = None  # kind "strength"
+    strength_after: StrengthView | None = None
     line: str  # the line printed by the CLI
 
     @classmethod
     def of(cls, change: replan_lib.Change) -> "ChangeView":
+        def view(item: Session | StrengthSession | None) -> SessionView | None:
+            return SessionView.of(item) if isinstance(item, Session) else None
+
+        def strength(item: Session | StrengthSession | None) -> StrengthView | None:
+            return StrengthView.of(item) if isinstance(item, StrengthSession) else None
+
         return cls(
             date=change.date,
             code=change.code,
-            before=SessionView.of(change.before) if change.before else None,
-            after=SessionView.of(change.after) if change.after else None,
+            kind="strength" if change.strength else "session",
+            before=view(change.before),
+            after=view(change.after),
+            strength_before=strength(change.before),
+            strength_after=strength(change.after),
             line=change.describe(),
         )
 

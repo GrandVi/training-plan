@@ -641,12 +641,14 @@ class StrengthPlanner:
     days.
     Time: strength minutes count in the weekly budget: sessions are shortened (accessories
     first), then dropped, with a warning. Ladders advance once per loading week, from the
-    rung of its completed sessions (an amended session without a rung holds it).
+    rung of its sessions; a skipped session or one without a rung (amended under 80% of its
+    minutes) holds the rung.
     """
 
     profile: Profile
     goals: Sequence[Goal]
     uses: dict[str, int] = field(default_factory=dict)  # template id -> next ladder level
+    held: set[dt.date] = field(default_factory=set)  # dates of skipped sessions (rung held)
     shortened: list[int] = field(default_factory=list)  # week indexes
     dropped: dict[int, int] = field(default_factory=dict)  # week index -> sessions dropped
 
@@ -660,12 +662,18 @@ class StrengthPlanner:
             self._advance(week)
 
     def _advance(self, week: Week) -> None:
-        if not loading(week):
+        """A loading week moves its ladder one rung up, unless one of its sessions was
+        skipped or not completed (rung None): then the rung is held."""
+        if not loading(week) or not week.strength:
+            return
+        end = week.start + dt.timedelta(days=6)
+        if any(week.start <= day <= end for day in self.held):
+            return
+        if any(session.rung is None for session in week.strength):
             return
         for session in week.strength:
-            if session.rung is not None:
-                done = self.uses.get(session.template_id, 0)
-                self.uses[session.template_id] = max(done, session.rung + 1)
+            done = self.uses.get(session.template_id, 0)
+            self.uses[session.template_id] = max(done, (session.rung or 0) + 1)
 
     def place(
         self,
@@ -723,7 +731,7 @@ class StrengthPlanner:
             self.dropped[week.index] = self.dropped.get(week.index, 0) + count - len(dates)
         budget = self.profile.availability.weekly_hours_budget * 60
         free = budget - week.duration_s / 60 - sum(s.minutes for s in kept)
-        placed = self._build(week, list(dates), free, len(kept))
+        placed = self._build(week, list(dates), free, sorted(taken))
         return sorted([*kept, *placed], key=lambda s: s.date)
 
     @staticmethod
@@ -755,14 +763,16 @@ class StrengthPlanner:
         return ()
 
     def _build(
-        self, week: Week, dates: list[dt.date], free_min: float, done: int
+        self, week: Week, dates: list[dt.date], free_min: float, taken: list[dt.date]
     ) -> list[StrengthSession]:
-        """Sessions on `dates`, shortened then dropped (last first) to fit `free_min`."""
+        """Sessions on `dates`, shortened then dropped (last first) to fit `free_min`.
+        Variants (A, B or full) follow the order of all the week's dates, `taken` ones
+        (kept or skipped sessions) included, so a skipped session is not made up."""
         minutes = self.settings.minutes
         while dates:
+            order = sorted([*taken, *dates])
             built = [
-                self._session(week, date, done + position, done + len(dates), minutes)
-                for position, date in enumerate(dates)
+                self._session(week, date, order.index(date), len(order), minutes) for date in dates
             ]
             sessions = [session for session in built if session is not None]
             if len(sessions) == len(dates) and sum(s.minutes for s in sessions) <= free_min:

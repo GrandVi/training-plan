@@ -9,7 +9,7 @@ description = "Multi-sport (cycling + running) training plan generator with inte
 readme = "README.md"
 requires-python = ">=3.11"
 # Core: the planning library only. Adapters come as extras (cli, http, api).
-dependencies = ["pydantic>=2.6", "PyYAML>=6.0"]
+dependencies = ["pydantic>=2.12", "PyYAML>=6.0"]
 
 [project.scripts]
 endurance-planner = "endurance_planner.launcher:main"

@@ -47,17 +47,22 @@ class ReplanError(PlanningError):
 
 @dataclass(frozen=True)
 class Change:
-    """One day whose session changed; `code` is a key of rules.CHANGE_REASONS."""
+    """One day whose session (or strength session) changed; `code` is a key of
+    rules.CHANGE_REASONS."""
 
     date: dt.date
     code: str
-    before: Session | None
-    after: Session | None
+    before: Session | StrengthSession | None
+    after: Session | StrengthSession | None
+
+    @property
+    def strength(self) -> bool:
+        return isinstance(self.before or self.after, StrengthSession)
 
     def describe(self) -> str:
-        return f"{self.date} {self.code:<21} {session_label(self.before)} -> " + session_label(
-            self.after
-        )
+        none = "no strength" if self.strength else "rest"
+        before = session_label(self.before, none)
+        return f"{self.date} {self.code:<21} {before} -> " + session_label(self.after, none)
 
 
 @dataclass(frozen=True)
@@ -71,10 +76,12 @@ class ReplanResult:
         return [issue for issue in self.issues if issue.severity is Severity.ERROR]
 
 
-def session_label(session: Session | None) -> str:
+def session_label(session: Session | StrengthSession | None, none: str = "rest") -> str:
     if session is None:
-        return "rest"
+        return none
     pin = " (pinned)" if session.pinned else ""
+    if isinstance(session, StrengthSession):
+        return f"Strength {session.minutes}m {session.name}{pin}"
     kind = session.activity_type.value + (" indoor" if session.indoor else "")
     duration = format_duration(session.duration_s)
     return f"{kind} {duration} {session.name} [{session.slot.value}]{pin}"
@@ -88,15 +95,18 @@ def change_lines(changes: Sequence[Change]) -> list[str]:
 
 
 def diff_plans(before: Plan, after: Plan, reason_of: ReasonOf, default: str) -> list[Change]:
-    """Days whose session differs between two versions of a plan."""
-    old = {s.date: s for week in before.weeks for s in week.sessions}
-    new = {s.date: s for week in after.weeks for s in week.sessions}
+    """Days whose session or strength session differs between two versions of a plan."""
     changes: list[Change] = []
-    for date in sorted(old.keys() | new.keys()):
-        if old.get(date) != new.get(date):
-            code = reason_of(date) or default
-            changes.append(Change(date, code, old.get(date), new.get(date)))
-    return changes
+    old: dict[dt.date, Session | StrengthSession]
+    new: dict[dt.date, Session | StrengthSession]
+    for field in ("sessions", "strength"):
+        old = {s.date: s for week in before.weeks for s in getattr(week, field)}
+        new = {s.date: s for week in after.weeks for s in getattr(week, field)}
+        for date in sorted(old.keys() | new.keys()):
+            if old.get(date) != new.get(date):
+                code = reason_of(date) or default
+                changes.append(Change(date, code, old.get(date), new.get(date)))
+    return sorted(changes, key=lambda change: (change.date, change.strength))
 
 
 def introduced_issues(before: Plan, after: Plan, profile: Profile) -> list[Issue]:
@@ -210,7 +220,11 @@ def strength_pins(plan: Plan, index: int, today: dt.date) -> StrengthPins:
 
 def _skipped_strength(plan: Plan, start: dt.date, end: dt.date) -> list[dt.date]:
     """Dates of strength sessions skipped by an amendment (not replaced: no catch-up)."""
-    return []
+    return [
+        a.date
+        for a in plan.active_amendments(AmendmentKind.STRENGTH)
+        if a.skip and start <= a.date <= end
+    ]
 
 
 def _build_unamended(
@@ -334,6 +348,9 @@ def replan_plan(
         first - 1 if first > 0 and plan.weeks[first - 1].start + dt.timedelta(6) >= today else first
     )
     planner = StrengthPlanner(effective, profile.goals)
+    planner.held = set(
+        _skipped_strength(plan, plan.weeks[0].start, plan.weeks[-1].start + dt.timedelta(6))
+    )
     planner.seed(weeks[:low])
     pins_of = {index: strength_pins(plan, index, today) for index in range(low, last + 1)}
     weeks = planner.place(weeks, low, last, pins_of)
